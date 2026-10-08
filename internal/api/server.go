@@ -551,6 +551,7 @@ func (s *Server) gamePayload(g store.Game) map[string]any {
 		"savePath":           g.SavePath,
 		"activeBranch":       g.ActiveBranch,
 		"autoSync":           g.AutoSync,
+		"provisioningHold":   s.Daemon != nil && s.Daemon.StoreProvisioningHeld(g.ID),
 		"maxSnapshots":       g.MaxSnapshots,
 		"maxManualSnapshots": g.MaxManualSnapshots,
 		"appId":              g.AppID,

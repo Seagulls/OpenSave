@@ -359,8 +359,14 @@ func (e *Engine) PeerGameList() []PeerGame {
 	if err != nil {
 		return []PeerGame{}
 	}
+	held, _ := e.Store.ProvisioningHeldSet()
 	out := make([]PeerGame, 0, len(games))
 	for _, g := range games {
+		// A game still being configured is not offered for linking. Linking
+		// would publish its id, and the peer would then ask for its saves.
+		if _, skip := held[g.ID]; skip {
+			continue
+		}
 		out = append(out, PeerGame{ID: g.ID, Name: g.Name, SavePath: g.SavePath, AppID: g.AppID})
 	}
 	return out
@@ -678,6 +684,10 @@ func (e *Engine) handleManifest(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusNotFound, syncengine.HeldMessage)
 		return
 	}
+	if e.provisioningHeld(game.ID) {
+		jsonError(w, http.StatusConflict, syncengine.ProvisioningMessage)
+		return
+	}
 	// Never describe a save a sync here is writing: part-way through, it is a
 	// mixture no device holds, and the asker would judge it as a save that had
 	// moved (syncengine/settle.go). Held still while it is read; a write in
@@ -759,6 +769,10 @@ func (e *Engine) handleBlocks(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusNotFound, "Game not found.")
 		return
 	}
+	if e.provisioningHeld(game.ID) {
+		jsonError(w, http.StatusConflict, syncengine.ProvisioningMessage)
+		return
+	}
 	base, ok := e.resolveServeRoot(gameID, game, body.Root)
 	if !ok {
 		jsonError(w, http.StatusNotFound, "This device has no save location named "+strconv.Quote(body.Root)+" for that game.")
@@ -801,6 +815,10 @@ func (e *Engine) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
 	game, err := e.trackedGameForPeer(gameID)
 	if err != nil {
 		jsonError(w, http.StatusNotFound, "Game not found.")
+		return
+	}
+	if e.provisioningHeld(game.ID) {
+		jsonError(w, http.StatusConflict, syncengine.ProvisioningMessage)
 		return
 	}
 	base, ok := e.resolveServeRoot(gameID, game, body.Root)
@@ -962,10 +980,14 @@ func (e *Engine) peerByAddress(ip string) (syncengine.Peer, bool) {
 // newer content for us to pull.
 func (e *Engine) handleSyncTrigger(w http.ResponseWriter, r *http.Request) {
 	gameID := chi.URLParam(r, "gameId")
+	if e.provisioningHeld(gameID) {
+		jsonError(w, http.StatusConflict, syncengine.ProvisioningMessage)
+		return
+	}
 	e.GoSync(func(ctx context.Context) {
 		ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 		defer cancel()
-		if _, err := e.SyncGame(ctx, gameID); err != nil && !errors.Is(err, syncengine.ErrHeld) {
+		if _, err := e.SyncGame(ctx, gameID); err != nil && !errors.Is(err, syncengine.ErrHeld) && !errors.Is(err, syncengine.ErrProvisioning) {
 			e.Log("warn", fmt.Sprintf("triggered sync for %s: %v", gameID, err))
 		}
 	})

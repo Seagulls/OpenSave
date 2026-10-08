@@ -6,6 +6,8 @@ import (
 	"strings"
 
 	"github.com/go-chi/chi/v5"
+
+	"github.com/opensave/opensave/internal/daemon"
 )
 
 // A game's extra save locations: the folders beyond its main one that belong
@@ -68,6 +70,12 @@ func (s *Server) handleAddGameRoot(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		path = abs
+		if s.Daemon.StoreProvisioningHeld(gameID) {
+			if err := daemon.RefuseSymlinkSave(path); err != nil {
+				writeError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+		}
 	}
 	// Rejections here are the overlap and naming rules, which are the user's
 	// to hear about rather than a server fault: "that folder is already

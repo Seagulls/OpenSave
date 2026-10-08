@@ -444,6 +444,11 @@ func (e *Engine) SyncGame(ctx context.Context, gameID string) (map[string]syncen
 	if e.Pause.Paused() {
 		return nil, syncengine.ErrPaused
 	}
+	// Before pinging anyone. A held game must not be the reason a peer is
+	// contacted, and the refusal must not depend on a peer being online.
+	if e.provisioningHeld(gameID) || e.provisioningHeld(e.localGameID(gameID)) {
+		return nil, syncengine.ErrProvisioning
+	}
 	gameID = e.localGameID(gameID)
 	e.PingPairedPeers(ctx)
 	online := e.OnlinePeers()
@@ -602,6 +607,12 @@ func (e *Engine) retryPendingResyncs(ctx context.Context) {
 		if ctx.Err() != nil {
 			return // shutting down; the failsafe picks these up next start
 		}
+		if e.provisioningHeld(id) {
+			e.pendingMu.Lock()
+			delete(e.pendingResync, id)
+			e.pendingMu.Unlock()
+			continue
+		}
 		e.Log("info", fmt.Sprintf("retrying interrupted sync for %s", id))
 		results, err := e.Sync.SyncGame(ctx, id, online)
 		if err == nil {
@@ -614,6 +625,21 @@ func (e *Engine) retryPendingResyncs(ctx context.Context) {
 			}
 		}
 	}
+}
+
+func (e *Engine) provisioningHeld(gameID string) bool {
+	if e == nil || e.Store == nil || gameID == "" {
+		return false
+	}
+	held, err := e.Store.ProvisioningHeld(gameID)
+	if err == nil && held {
+		return true
+	}
+	if canonical, ok := e.Store.ResolveGameAlias(gameID); ok && canonical != gameID {
+		held, err = e.Store.ProvisioningHeld(canonical)
+		return err == nil && held
+	}
+	return false
 }
 
 // SyncAllGames syncs every tracked game (used when a peer comes online).
@@ -629,8 +655,9 @@ func (e *Engine) SyncAllGames(ctx context.Context) {
 	if len(online) == 0 {
 		return
 	}
+	held, _ := e.Store.ProvisioningHeldSet()
 	for _, g := range games {
-		if !g.AutoSync {
+		if _, skip := held[g.ID]; !g.AutoSync || skip {
 			continue
 		}
 		results, err := e.Sync.SyncGame(ctx, g.ID, online)

@@ -20,6 +20,9 @@ import (
 // cmdGame edits one game's settings.
 func cmdGame(d *daemon.Daemon, args []string) int {
 	asJSON, args := jsonFlag(args)
+	if len(args) >= 2 && args[1] == "release" {
+		return releaseProvisioning(d, gameIDFrom(args), asJSON)
+	}
 	if len(args) < 2 || args[1] != "set" {
 		fmt.Fprintln(os.Stderr, gameUsage)
 		return 1
@@ -80,7 +83,7 @@ func cmdGame(d *daemon.Daemon, args []string) int {
 	// Re-watch so a path or auto-sync change takes effect immediately rather
 	// than at the next restart.
 	d.Watcher.Unwatch(game.ID)
-	if game.AutoSync {
+	if game.AutoSync && !d.StoreProvisioningHeld(game.ID) {
 		if err := d.Watcher.Watch(game.ID, game.SavePath); err != nil {
 			d.Log.Log("warn", "re-watch after config change failed: "+err.Error())
 		}
@@ -93,7 +96,50 @@ func cmdGame(d *daemon.Daemon, args []string) int {
 	return 0
 }
 
+func gameIDFrom(args []string) string {
+	if len(args) == 0 {
+		return ""
+	}
+	return args[0]
+}
+
+func releaseProvisioning(d *daemon.Daemon, gameID string, asJSON bool) int {
+	if gameID == "" {
+		fmt.Fprintln(os.Stderr, gameUsage)
+		return 1
+	}
+	// Prefer the running daemon so the release starts a watch and a sync of
+	// this game there. The short-lived process below is the fallback when
+	// nothing is listening, and the next launch of the real daemon picks the
+	// cleared hold up from the database.
+	if daemonRunning() {
+		raw, err := daemonRequest("POST", "/api/games/"+gameID+"/release-provisioning", map[string]any{})
+		if err != nil {
+			return fail(asJSON, err)
+		}
+		if asJSON {
+			return emitRawJSON(raw)
+		}
+		success("Released %s. It can sync from here on.", bold(gameID))
+		return 0
+	}
+	released, err := d.ReleaseProvisioning(gameID)
+	if err != nil {
+		return fail(asJSON, err)
+	}
+	if asJSON {
+		return emitJSON(map[string]any{"id": gameID, "released": released, "alreadyReleased": !released})
+	}
+	if released {
+		success("Released %s. It can sync from here on.", bold(gameID))
+	} else {
+		success("%s was already released.", bold(gameID))
+	}
+	return 0
+}
+
 const gameUsage = `usage: opensave game <gameId> set <key> <value>
+       opensave game <gameId> release   let a game that was being configured start syncing
 
   name <text>            Display name (also how peers match this game)
   path <dir|file>        Move tracking to a different save location

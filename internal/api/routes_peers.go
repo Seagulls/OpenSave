@@ -252,6 +252,8 @@ func syncReason(err error) string {
 		return "paused"
 	case errors.Is(err, syncengine.ErrHeld):
 		return "held"
+	case errors.Is(err, syncengine.ErrProvisioning):
+		return "provisioning"
 	case errors.Is(err, p2p.ErrNoPeersOnline):
 		return "offline"
 	default:
@@ -269,6 +271,10 @@ func (s *Server) handleSyncAll(w http.ResponseWriter, r *http.Request) {
 	}
 	results := map[string]any{}
 	for _, g := range games {
+		if s.Daemon.StoreProvisioningHeld(g.ID) {
+			results[g.ID] = map[string]string{"status": "skipped", "reason": "provisioning"}
+			continue
+		}
 		if !g.AutoSync {
 			results[g.ID] = map[string]string{"status": "skipped", "reason": "autoSync disabled"}
 			continue
