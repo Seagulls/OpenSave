@@ -156,6 +156,14 @@ func (s *Store) CreateHeldGame(g Game) error {
 // whose AutoSync the user turned off on purpose. The bool is whether this
 // call released a hold.
 func (s *Store) ReleaseProvisioning(gameID string) (bool, error) {
+	return s.ReleaseProvisioningMode(gameID, true)
+}
+
+// ReleaseProvisioningMode clears the hold. enableAutoSync false leaves
+// AutoSync off, so reconcile, reconnect and the watcher do not sync the game.
+// The caller then syncs it explicitly. A game that is not held is left
+// unchanged either way.
+func (s *Store) ReleaseProvisioningMode(gameID string, enableAutoSync bool) (bool, error) {
 	tx, err := s.db.Beginx()
 	if err != nil {
 		return false, err
@@ -173,8 +181,12 @@ func (s *Store) ReleaseProvisioning(gameID string) (bool, error) {
 	if n == 0 {
 		return false, tx.Commit()
 	}
-	if _, err := tx.Exec(`UPDATE games SET auto_sync = 1 WHERE id = ?`, gameID); err != nil {
-		return false, fmt.Errorf("enable auto-sync %s: %w", gameID, err)
+	auto := 0
+	if enableAutoSync {
+		auto = 1
+	}
+	if _, err := tx.Exec(`UPDATE games SET auto_sync = ? WHERE id = ?`, auto, gameID); err != nil {
+		return false, fmt.Errorf("set auto-sync %s: %w", gameID, err)
 	}
 	return true, tx.Commit()
 }

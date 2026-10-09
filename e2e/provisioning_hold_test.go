@@ -504,6 +504,135 @@ func TestProvisioningHold_StarLeavesHeldEndpointAlone(t *testing.T) {
 	}
 }
 
+// Default release turns AutoSync on. The periodic reconcile and a peer
+// coming online call SyncAllGames, not the explicit sync route. That is
+// enough to move bytes. This is the witness that "release does not call
+// SyncGame" is not "nothing syncs until asked".
+func TestProvisioningHold_DefaultReleaseLetsReconcileSync(t *testing.T) {
+	source := testutil.NewTestDaemon(t, "Reconcile-Source")
+	bridge := testutil.NewTestDaemon(t, "Reconcile-Bridge")
+	source.PairWith(bridge)
+	const id = "reconcile-game"
+	src := sideDir(t, source, "recon")
+	br := sideDir(t, bridge, "recon")
+	writeHoldFile(t, src, "slot.sav", "RECONCILE-BYTES")
+	createHeld(t, source, id, "Reconcile Game", src)
+	createHeld(t, bridge, id, "Reconcile Game", br)
+	source.API(http.MethodPost, "/api/games/"+id+"/release-provisioning", nil, nil)
+	bridge.API(http.MethodPost, "/api/games/"+id+"/release-provisioning", nil, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	source.Daemon.P2P.PingPairedPeers(ctx)
+	source.Daemon.P2P.SyncAllGames(ctx)
+	if !testutil.WaitFor(20*time.Second, func() bool {
+		return readHoldFile(br, "slot.sav") == "RECONCILE-BYTES"
+	}) {
+		t.Fatal("default release plus reconcile did not sync; the witness is wrong or the path changed")
+	}
+}
+
+// Staged release clears the hold and leaves AutoSync off. Reconcile, a
+// restart, and a file write must not move bytes. An explicit sync may, and
+// a peer that is still held must refuse. Both ends of the star are tried as
+// the writer.
+func TestProvisioningHold_StagedReleaseSkipsReconcile(t *testing.T) {
+	for _, writer := range []string{"bazzite", "deck"} {
+		t.Run(writer, func(t *testing.T) {
+			bazzite := testutil.NewTestDaemon(t, "Staged-Bazzite")
+			bridge := testutil.NewTestDaemon(t, "Staged-Bridge")
+			deck := testutil.NewTestDaemon(t, "Staged-Deck")
+			bazzite.PairWith(bridge)
+			deck.PairWith(bridge)
+			const id = "staged-game"
+			bz := sideDir(t, bazzite, "staged")
+			br := sideDir(t, bridge, "staged")
+			dk := sideDir(t, deck, "staged")
+			writeHoldFile(t, bz, "progress.sav", "BAZZITE-ONLY")
+			writeHoldFile(t, dk, "progress.sav", "DECK-ONLY")
+			createHeld(t, bazzite, id, "Staged Game", bz)
+			createHeld(t, bridge, id, "Staged Game", br)
+			createHeld(t, deck, id, "Staged Game", dk)
+
+			progressed := bazzite
+			progressedDir, quietDir, quietBytes := bz, dk, "DECK-ONLY"
+			if writer == "deck" {
+				progressed = deck
+				progressedDir, quietDir, quietBytes = dk, bz, "BAZZITE-ONLY"
+			}
+			var rel struct {
+				Released bool `json:"released"`
+				AutoSync bool `json:"autoSync"`
+			}
+			progressed.API(http.MethodPost, "/api/games/"+id+"/release-provisioning", map[string]any{"autoSync": false}, &rel)
+			bridge.API(http.MethodPost, "/api/games/"+id+"/release-provisioning", map[string]any{"autoSync": false}, &rel)
+			if rel.AutoSync {
+				t.Fatal("staged release turned AutoSync on")
+			}
+			writeHoldFile(t, progressedDir, "later.sav", "AFTER-RELEASE")
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			for _, node := range []*testutil.TestDaemon{bazzite, bridge, deck} {
+				node.Daemon.P2P.PingPairedPeers(ctx)
+				node.Daemon.P2P.SyncAllGames(ctx)
+			}
+			if readHoldFile(br, "progress.sav") != "" || readHoldFile(quietDir, "progress.sav") != quietBytes {
+				t.Fatalf("staged reconcile moved bytes: bridge=%q quiet=%q", readHoldFile(br, "progress.sav"), readHoldFile(quietDir, "progress.sav"))
+			}
+			progressed.Restart()
+			bridge.Restart()
+			progressed.Daemon.P2P.PingPairedPeers(ctx)
+			progressed.Daemon.P2P.SyncAllGames(ctx)
+			if readHoldFile(br, "progress.sav") != "" {
+				t.Fatal("restart after staged release let reconcile copy the save")
+			}
+			if !testutil.WaitFor(45*time.Second, func() bool {
+				progressed.API(http.MethodPost, "/api/games/"+id+"/sync", nil, nil)
+				return readHoldFile(br, "progress.sav") == map[string]string{"bazzite": "BAZZITE-ONLY", "deck": "DECK-ONLY"}[writer]
+			}) {
+				t.Fatalf("explicit sync after staged release did not converge the released pair: bridge=%q", readHoldFile(br, "progress.sav"))
+			}
+			if readHoldFile(quietDir, "progress.sav") != quietBytes || readHoldFile(quietDir, "later.sav") != "" {
+				t.Fatal("explicit sync moved the peer that is still held")
+			}
+		})
+	}
+}
+
+func TestProvisioningHold_PatchDoesNotUnhold(t *testing.T) {
+	source := testutil.NewTestDaemon(t, "Patch-Source")
+	bridge := testutil.NewTestDaemon(t, "Patch-Bridge")
+	source.PairWith(bridge)
+	const id = "patch-game"
+	src := sideDir(t, source, "patch")
+	br := sideDir(t, bridge, "patch")
+	writeHoldFile(t, src, "slot.sav", "PATCH-BYTES")
+	createHeld(t, source, id, "Patch Game", src)
+	createHeld(t, bridge, id, "Patch Game", br)
+	var patched struct {
+		Name                    string `json:"name"`
+		AutoSync                bool   `json:"autoSync"`
+		ProvisioningHold        bool   `json:"provisioningHold"`
+		ProvisioningHoldUnknown bool   `json:"provisioningHoldUnknown"`
+	}
+	source.API(http.MethodPatch, "/api/games/"+id, map[string]any{
+		"name": "Renamed", "savePath": src, "autoSync": true,
+	}, &patched)
+	if patched.Name != "Renamed" || patched.AutoSync || !patched.ProvisioningHold || patched.ProvisioningHoldUnknown {
+		t.Fatalf("patch changed the hold contract: %+v", patched)
+	}
+	held, err := source.Daemon.Store.ProvisioningHeld(id)
+	if err != nil || !held {
+		t.Fatal("PATCH cleared the hold")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	source.Daemon.P2P.PingPairedPeers(ctx)
+	source.Daemon.P2P.SyncAllGames(ctx)
+	if readHoldFile(br, "slot.sav") != "" {
+		t.Fatal("PATCH autoSync true let reconcile copy a held save")
+	}
+}
+
 func TestProvisioningHold_OrdinaryTrackUnchanged(t *testing.T) {
 	node := testutil.NewTestDaemon(t, "Ordinary")
 	var got holdGame

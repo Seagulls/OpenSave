@@ -969,28 +969,33 @@ func (d *Daemon) provisioningBlocks(gameID string) bool {
 	return held
 }
 
-// ReleaseProvisioning clears the hold and starts watching. It does not sync.
-// SyncGame would contact every online peer. The caller syncs after it has
-// released only the peers that should converge. A second call is a no-op.
+// ReleaseProvisioning clears the hold, turns AutoSync on, and starts watching.
+// It does not call SyncGame. Reconcile and a peer coming online will, because
+// AutoSync is on. Use ReleaseProvisioningMode when that must not happen yet.
 func (d *Daemon) ReleaseProvisioning(gameID string) (bool, error) {
+	return d.ReleaseProvisioningMode(gameID, true)
+}
+
+// ReleaseProvisioningMode clears the hold. enableAutoSync false does not
+// watch and does not turn AutoSync on, so reconcile, reconnect and a file
+// change do not sync. An explicit sync still can, and a peer that is still
+// held still refuses. A second call is a no-op and does not change AutoSync.
+func (d *Daemon) ReleaseProvisioningMode(gameID string, enableAutoSync bool) (bool, error) {
 	game, err := d.Store.GetGame(gameID)
 	if err != nil {
 		return false, err
 	}
-	released, err := d.Store.ReleaseProvisioning(gameID)
+	released, err := d.Store.ReleaseProvisioningMode(gameID, enableAutoSync)
 	if err != nil || !released {
 		return released, err
 	}
-	if err := d.watchGame(game.ID, game.SavePath); err != nil &&
-		!errors.Is(err, watcher.ErrStopped) && !errors.Is(err, watcher.ErrSaveFolderMissing) {
-		d.Log.Log("warn", fmt.Sprintf("could not watch %q after release: %v", game.Name, err))
+	if enableAutoSync {
+		if err := d.watchGame(game.ID, game.SavePath); err != nil &&
+			!errors.Is(err, watcher.ErrStopped) && !errors.Is(err, watcher.ErrSaveFolderMissing) {
+			d.Log.Log("warn", fmt.Sprintf("could not watch %q after release: %v", game.Name, err))
+		}
 	}
-	// Do not SyncGame here. That call contacts every online peer and can
-	// spread one endpoint's save to another before the caller has released
-	// only the pair it means to converge. The caller syncs explicitly.
-	// A peer that is still held still refuses, so a later reconcile cannot
-	// move that peer's files.
-	d.Log.Log("info", fmt.Sprintf("released %q; it can sync when asked, and only with peers that are not still being configured", game.Name))
+	d.Log.Log("info", fmt.Sprintf("released %q (autoSync=%t); it is not synced by this call", game.Name, enableAutoSync))
 	return true, nil
 }
 

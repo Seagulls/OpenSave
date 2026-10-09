@@ -399,11 +399,22 @@ func (s *Server) handleUpdateGame(w http.ResponseWriter, r *http.Request) {
 	oldAutoSync := game.AutoSync
 	oldIgnore := game.SyncIgnore
 	oldAppID := game.AppID
+	heldBefore, holdErr := s.Daemon.StoreProvisioningHeld(gameID)
+	if holdErr != nil {
+		writeError(w, http.StatusServiceUnavailable, "could not read whether this game is still being configured")
+		return
+	}
 	if err := readJSON(r, &game); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	game.ID = gameID // id is not client-mutable
+	// A hold is not a column on the game. A PATCH that sends autoSync, including
+	// a form that round-trips the whole object, must not clear it and must not
+	// turn the column on while the hold remains. Release is the only unblock.
+	if heldBefore {
+		game.AutoSync = oldAutoSync
+	}
 
 	// A changed save path is validated exactly as a fresh track is. This
 	// decoded straight into the stored game and wrote it back, so a path that

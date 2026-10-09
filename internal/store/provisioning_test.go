@@ -64,6 +64,21 @@ func TestCreateHeldGameIsAtomicAndDefaultsExistingGamesClear(t *testing.T) {
 		t.Fatal("a no-op release changed AutoSync on a game that was not held")
 	}
 
+	if err := s.CreateHeldGame(Game{ID: "staged", Name: "Staged", SavePath: "/tmp/staged", MaxSnapshots: 20}); err != nil {
+		t.Fatal(err)
+	}
+	released, err = s.ReleaseProvisioningMode("staged", false)
+	if err != nil || !released {
+		t.Fatalf("staged release = %v, %v", released, err)
+	}
+	staged, err := s.GetGame("staged")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if staged.AutoSync {
+		t.Fatal("staged release turned AutoSync on")
+	}
+
 	released, err = s.ReleaseProvisioning("configuring")
 	if err != nil || !released {
 		t.Fatalf("release = %v, %v", released, err)

@@ -13,11 +13,12 @@ All notable changes to OpenSave are documented here. This project adheres to
   step. The hold survives a daemon restart and is not the ordinary AutoSync
   flag: peers cannot pull or push that game's saves, and releasing one game
   does not sync the rest of the library. `POST /api/games/{id}/release-provisioning`
-  clears the hold and does not sync by itself. The caller syncs afterwards,
-  so release does not contact every online peer. A third device that is still
-  held cannot send or receive that game's saves. An explicit game id is
-  accepted only while creating a hold. A failed hold lookup is not treated as
-  "not held". See issue #40.
+  clears the hold. An empty body turns AutoSync on, so reconcile can sync
+  that game with every online peer that is not still held. `{"autoSync": false}`
+  clears the hold and leaves AutoSync off, so reconcile, reconnect and the
+  watcher do not sync it; the caller syncs explicitly. A PATCH cannot clear
+  the hold. `provisioningHoldUnknown` is true when the hold cannot be read,
+  and `provisioningHold` is not reported false in that case. See issue #40.
 
 ## [2.4.1] — 2026-10-02
 
