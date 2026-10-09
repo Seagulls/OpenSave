@@ -15,12 +15,25 @@ was not downloaded. Linux only. No Windows or macOS run.
 
 | Branch | Base | Tip | Pushed |
 | --- | --- | --- | --- |
-| `feat/atomic-safe-game-provisioning` | `346d9bda0749fb57b48fd266f13e535af80f0285` | `eb60926b03ee1450358034a3efc2ff84ddfdb842` | `Seagulls/OpenSave` only |
+| `feat/atomic-safe-game-provisioning` | `346d9bda0749fb57b48fd266f13e535af80f0285` | `2fee76ffe91e9387d6ee717727a6b85779ddf0fd` | `Seagulls/OpenSave` only |
 | `fix/agreed-base-precedes-mtime` | same base | `aee1c1add543a80e5f400fcde2f4e466659c0ac6` | `Seagulls/OpenSave` only |
 | `review/upstream-handoff` | docs only | this commit | docs only |
 
 Previous reviewed tips `af05e65` and `8d893ff` are parents of the tips above.
 `1508845` and `feedc3b` remain ancestors. No force-push.
+
+## 1a. Draft upstream PRs
+
+Opened against `Liquid-co/OpenSave:main` (`346d9bda`). Not merged.
+
+| PR | Draft | Head |
+| --- | --- | --- |
+| https://github.com/Liquid-co/OpenSave/pull/42 | yes | `aee1c1add543a80e5f400fcde2f4e466659c0ac6` `fix/agreed-base-precedes-mtime` |
+| https://github.com/Liquid-co/OpenSave/pull/43 | yes | `2fee76ffe91e9387d6ee717727a6b85779ddf0fd` `feat/atomic-safe-game-provisioning` |
+
+Vercel reported FAILURE on both. The check URL is a third-party authorize page, not an OpenSave test result.
+
+`2fee76f` is one fixture-only commit on top of `eb60926`: the 100-game test now syncs the unrelated live game first and requires both agreed hashes. Production code was not changed. `TestProvisioningHold_HundredGamesStayOneDaemon` passed three times on Go 1.26.4. `go test -count=1 -timeout 25m ./e2e/...` on that working tree passed in 757s. Race `TestProvisioning` passed. Package tests and vet passed. `TestSessionNamesTheSnapshotAlreadyTaken` still fails intermittently on Go 1.26.4 and was excluded only from the supplemental daemon gate.
 
 ## 1b. Final hardening tranche
 
