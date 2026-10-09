@@ -86,6 +86,27 @@ func TestBaseFirstBothChangedStillConflict(t *testing.T) {
 // A base that matches neither side is not evidence. Mtime remains the only
 // ordering this function will use, and that can still be wrong. This pins the
 // limit rather than inventing a winner.
+// A deliberate local deletion of a file that is still in the lineage must
+// propagate, not be undone because the peer's copy of the agreed base has a
+// later mtime. The base-first file rule does not apply: the file is absent
+// here.
+func TestBaseFirstDoesNotResurrectADeletedFile(t *testing.T) {
+	base := delta.Manifest{Files: map[string]delta.FileEntry{
+		"slot.sav": {Hash: "old", MtimeMs: 1000},
+	}}
+	remote := delta.Manifest{Files: map[string]delta.FileEntry{
+		"slot.sav": {Hash: "old", MtimeMs: 9000},
+	}}
+	local := delta.Manifest{Files: map[string]delta.FileEntry{}}
+	d := ComputeWithBase(local, remote, map[string]struct{}{"slot.sav": {}}, nil, base.ManifestHash())
+	if len(d.FilesToPull) != 0 {
+		t.Fatalf("deleted file was pulled back: %+v", d)
+	}
+	if len(d.FilesToDeleteOnPeer) != 1 || d.FilesToDeleteOnPeer[0] != "slot.sav" {
+		t.Fatalf("deletion was not propagated: %+v", d)
+	}
+}
+
 func TestStaleAgreedBaseDoesNotOverrideMtime(t *testing.T) {
 	local := tieManifest("LOCAL", 2000)
 	remote := tieManifest("REMOTE", 1000)

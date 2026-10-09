@@ -55,3 +55,33 @@ func TestAgreedBaseBeatsNewerMtimeOnPrimaryAndExtraRoot(t *testing.T) {
 			readIn(b.SaveDir, "save.sav"), readIn(bConfig, "settings.ini"))
 	}
 }
+
+// The other direction: the peer holds the only edit, with an older mtime,
+// and this device holds the agreed base with a later timestamp. Sync must
+// pull, not push the base over the edit. Primary folder and the named root.
+func TestAgreedBasePullsOlderMtimeProgressOnPrimaryAndExtraRoot(t *testing.T) {
+	a, b, gameID, aConfig, bConfig := twoLocationPair(t, "BaseMtimePull", map[string]string{
+		"settings.ini": "base-config",
+	})
+	pauseAutoSync(t, a, b, gameID)
+
+	writeIn(t, b.SaveDir, "save.sav", "progressed-primary")
+	touchOlder(t, filepath.Join(b.SaveDir, "save.sav"))
+	touchNewer(t, filepath.Join(a.SaveDir, "save.sav"))
+
+	writeIn(t, bConfig, "settings.ini", "progressed-config")
+	touchOlder(t, filepath.Join(bConfig, "settings.ini"))
+	touchNewer(t, filepath.Join(aConfig, "settings.ini"))
+
+	if !testutil.WaitFor(45*time.Second, func() bool {
+		a.API(http.MethodPost, "/api/games/"+gameID+"/sync", nil, nil)
+		return readIn(a.SaveDir, "save.sav") == "progressed-primary" &&
+			readIn(aConfig, "settings.ini") == "progressed-config" &&
+			readIn(b.SaveDir, "save.sav") == "progressed-primary" &&
+			readIn(bConfig, "settings.ini") == "progressed-config"
+	}) {
+		t.Fatalf("local base overwrote remote progress: a primary=%q config=%q b primary=%q config=%q",
+			readIn(a.SaveDir, "save.sav"), readIn(aConfig, "settings.ini"),
+			readIn(b.SaveDir, "save.sav"), readIn(bConfig, "settings.ini"))
+	}
+}
