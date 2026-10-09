@@ -390,30 +390,52 @@ func TestProvisioningHold_NamedRootsBeforeRelease(t *testing.T) {
 
 func TestProvisioningHold_HundredGamesStayOneDaemon(t *testing.T) {
 	source := testutil.NewTestDaemon(t, "Bulk-Source")
-	bridge := testutil.NewTestDaemon(t, "Bulk-Bridge")
+	receiver := testutil.NewTestDaemon(t, "Bulk-Receiver")
 	liveSrc := sideDir(t, source, "live")
-	liveBr := sideDir(t, bridge, "live")
+	liveRecv := sideDir(t, receiver, "live")
 	writeHoldFile(t, liveSrc, "live.sav", "LIVE")
-	writeHoldFile(t, liveBr, "live.sav", "LIVE")
 	source.API(http.MethodPost, "/api/games", map[string]string{"name": "Bulk Live", "savePath": liveSrc}, nil)
-	bridge.API(http.MethodPost, "/api/games", map[string]string{"name": "Bulk Live", "savePath": liveBr}, nil)
-	source.PairWith(bridge)
+	receiver.API(http.MethodPost, "/api/games", map[string]string{"name": "Bulk Live", "savePath": liveRecv}, nil)
+	source.PairWith(receiver)
+	liveID := store.SlugifyGameID("Bulk Live")
+	if !testutil.WaitFor(30*time.Second, func() bool {
+		source.API(http.MethodPost, "/api/games/"+liveID+"/sync", nil, nil)
+		return readHoldFile(t, liveSrc, "live.sav") == "LIVE" && readHoldFile(t, liveRecv, "live.sav") == "LIVE"
+	}) {
+		t.Fatal("the unrelated live game did not establish an initial sync")
+	}
+	srcBase := source.Daemon.Store.GetAgreedHash(liveID, receiver.NodeID())
+	recvBase := receiver.Daemon.Store.GetAgreedHash(liveID, source.NodeID())
+	if srcBase == "" || recvBase == "" || srcBase != recvBase {
+		t.Fatalf("initial sync left no bilateral agreed base: source=%q receiver=%q", srcBase, recvBase)
+	}
 
 	start := time.Now()
 	for i := 0; i < 100; i++ {
 		id := "bulk-" + hex.EncodeToString([]byte{byte(i)})
 		dir := sideDir(t, source, id)
+		writeHoldFile(t, dir, "held.sav", "HELD-"+id)
 		createHeld(t, source, id, "Bulk "+id, dir)
 	}
 	if elapsed := time.Since(start); elapsed > 45*time.Second {
 		t.Fatalf("100 held creates took %s; this must not be a daemon per game", elapsed)
 	}
+	offers, err := receiver.Daemon.Store.ListOfferedGames()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(offers) != 0 {
+		t.Fatalf("held creates published %d offers", len(offers))
+	}
 	writeHoldFile(t, liveSrc, "live.sav", "LIVE-UPDATED")
 	if !testutil.WaitFor(30*time.Second, func() bool {
-		source.API(http.MethodPost, "/api/games/"+store.SlugifyGameID("Bulk Live")+"/sync", nil, nil)
-		return readHoldFile(t, liveBr, "live.sav") == "LIVE-UPDATED"
+		source.API(http.MethodPost, "/api/games/"+liveID+"/sync", nil, nil)
+		return readHoldFile(t, liveRecv, "live.sav") == "LIVE-UPDATED" && readHoldFile(t, liveSrc, "live.sav") == "LIVE-UPDATED"
 	}) {
 		t.Fatal("the live game did not sync beside 100 held games")
+	}
+	if _, err := os.Stat(filepath.Join(liveRecv, "held.sav")); !os.IsNotExist(err) {
+		t.Fatalf("a held save appeared on the receiver: %v", err)
 	}
 	source.Restart()
 	set, err := source.Daemon.Store.ProvisioningHeldSet()
