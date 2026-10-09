@@ -480,7 +480,10 @@ func (s *Server) handleUpdateGame(w http.ResponseWriter, r *http.Request) {
 	// would sync a game that has not been released.
 	if game.SavePath != oldSavePath || game.AutoSync != oldAutoSync {
 		s.Daemon.Watcher.Unwatch(gameID)
-		if game.AutoSync && !s.Daemon.StoreProvisioningHeld(gameID) {
+		held, holdErr := s.Daemon.StoreProvisioningHeld(gameID)
+		if holdErr != nil {
+			s.Daemon.Log.Log("warn", "not watching "+gameID+": provisioning hold could not be read: "+holdErr.Error())
+		} else if game.AutoSync && !held {
 			if err := s.Daemon.Watcher.Watch(gameID, game.SavePath); err != nil {
 				s.Daemon.Log.Log("warn", "re-watch failed: "+err.Error())
 			}

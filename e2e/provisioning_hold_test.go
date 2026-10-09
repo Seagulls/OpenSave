@@ -423,6 +423,87 @@ func TestProvisioningHold_HundredGamesStayOneDaemon(t *testing.T) {
 	}
 }
 
+func TestProvisioningHold_DoesNotConvertAnExistingGame(t *testing.T) {
+	node := testutil.NewTestDaemon(t, "Hold-Existing")
+	var live holdGame
+	node.API(http.MethodPost, "/api/games", map[string]string{
+		"name": "Already Live", "savePath": node.SaveDir,
+	}, &live)
+	writeHoldFile(t, node.SaveDir, "keep.sav", "LIVE-BYTES")
+	var errBody struct {
+		Error string `json:"error"`
+	}
+	if status := node.APIStatus(http.MethodPost, "/api/games", map[string]any{
+		"id": live.ID, "name": "Already Live", "savePath": node.SaveDir, "provisioningHold": true,
+	}, &errBody); status < 400 {
+		t.Fatal("a hold was accepted for a game that was already tracking")
+	}
+	got, err := node.Daemon.Store.GetGame(live.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.AutoSync {
+		t.Fatal("the failed hold turned AutoSync off")
+	}
+	held, err := node.Daemon.Store.ProvisioningHeld(live.ID)
+	if err != nil || held {
+		t.Fatalf("existing game held=%v err=%v", held, err)
+	}
+	if readHoldFile(node.SaveDir, "keep.sav") != "LIVE-BYTES" {
+		t.Fatal("the failed hold changed save bytes")
+	}
+}
+
+// Three peers in a star: ends talk only to the middle. Releasing the two ends
+// that should converge must not move the third while it is still held, and
+// release itself must not start that transfer.
+func TestProvisioningHold_StarLeavesHeldEndpointAlone(t *testing.T) {
+	bazzite := testutil.NewTestDaemon(t, "Star-Bazzite")
+	bridge := testutil.NewTestDaemon(t, "Star-Bridge")
+	deck := testutil.NewTestDaemon(t, "Star-Deck")
+	bazzite.PairWith(bridge)
+	deck.PairWith(bridge)
+	if _, err := bazzite.Daemon.Store.GetPeer(deck.NodeID()); err == nil {
+		t.Fatal("bazzite is paired with deck; the fixture is not a star")
+	}
+
+	const id = "star-game"
+	bz := sideDir(t, bazzite, "star")
+	br := sideDir(t, bridge, "star")
+	dk := sideDir(t, deck, "star")
+	writeHoldFile(t, bz, "progress.sav", "BAZZITE-ONLY")
+	writeHoldFile(t, dk, "progress.sav", "DECK-ONLY")
+	createHeld(t, bazzite, id, "Star Game", bz)
+	createHeld(t, bridge, id, "Star Game", br)
+	createHeld(t, deck, id, "Star Game", dk)
+
+	var rel struct {
+		Released bool `json:"released"`
+	}
+	bazzite.API(http.MethodPost, "/api/games/"+id+"/release-provisioning", nil, &rel)
+	bridge.API(http.MethodPost, "/api/games/"+id+"/release-provisioning", nil, &rel)
+	// Release must not itself copy. The deck is still held.
+	if readHoldFile(br, "progress.sav") != "" || readHoldFile(dk, "progress.sav") != "DECK-ONLY" {
+		t.Fatal("release transferred before an explicit sync")
+	}
+	if !testutil.WaitFor(45*time.Second, func() bool {
+		bazzite.API(http.MethodPost, "/api/games/"+id+"/sync", nil, nil)
+		return readHoldFile(br, "progress.sav") == "BAZZITE-ONLY" &&
+			readHoldFile(dk, "progress.sav") == "DECK-ONLY" &&
+			readHoldFile(bz, "progress.sav") == "BAZZITE-ONLY"
+	}) {
+		t.Fatalf("star sync moved a held endpoint or failed to converge the released pair: bridge=%q deck=%q bazzite=%q",
+			readHoldFile(br, "progress.sav"), readHoldFile(dk, "progress.sav"), readHoldFile(bz, "progress.sav"))
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	bridge.Daemon.P2P.PingPairedPeers(ctx)
+	bridge.Daemon.P2P.SyncAllGames(ctx)
+	if readHoldFile(dk, "progress.sav") != "DECK-ONLY" || readHoldFile(bz, "progress.sav") != "BAZZITE-ONLY" {
+		t.Fatal("reconcile on the middle peer moved a held endpoint or overwrote the released source")
+	}
+}
+
 func TestProvisioningHold_OrdinaryTrackUnchanged(t *testing.T) {
 	node := testutil.NewTestDaemon(t, "Ordinary")
 	var got holdGame

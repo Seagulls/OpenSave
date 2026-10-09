@@ -200,7 +200,7 @@ func New(opts Options) (*Daemon, error) {
 		// A game still being configured must not publish its snapshot. The
 		// name is gameID__branch__snapID.zip (cloudSnapshotName). Checked
 		// before the pause queue: a resume must not send it either.
-		if id, _, ok := strings.Cut(remoteFileName, "__"); ok && d.provisioningHeld(id) {
+		if id, _, ok := strings.Cut(remoteFileName, "__"); ok && d.provisioningBlocks(id) {
 			return
 		}
 		if d.P2P.Pause.Paused() {
@@ -291,7 +291,7 @@ func (d *Daemon) Start() error {
 				_ = d.Store.UpdateGame(game)
 			}
 		}
-		if !game.AutoSync || d.provisioningHeld(game.ID) {
+		if !game.AutoSync || d.provisioningBlocks(game.ID) {
 			continue
 		}
 		if err := d.watchGame(game.ID, game.SavePath); err != nil {
@@ -623,7 +623,7 @@ func (d *Daemon) ResyncWatchers() (started, stopped int) {
 	names := make(map[string]string, len(games))
 	for _, game := range games {
 		names[game.ID] = game.Name
-		if game.AutoSync && !d.provisioningHeld(game.ID) {
+		if game.AutoSync && !d.provisioningBlocks(game.ID) {
 			want[game.ID] = game.SavePath
 		}
 	}
@@ -934,8 +934,9 @@ func refuseSymlinkSave(path string) error {
 }
 
 // StoreProvisioningHeld reports whether gameID, or an alias of it, is still
-// being configured. The API uses it to keep a hold from being watched.
-func (d *Daemon) StoreProvisioningHeld(gameID string) bool {
+// being configured. A non-nil error means the hold could not be read; that
+// is not the same as false.
+func (d *Daemon) StoreProvisioningHeld(gameID string) (bool, error) {
 	return d.provisioningHeld(gameID)
 }
 
@@ -944,24 +945,33 @@ func RefuseSymlinkSave(path string) error {
 	return refuseSymlinkSave(path)
 }
 
-func (d *Daemon) provisioningHeld(gameID string) bool {
-	if d == nil || d.Store == nil || gameID == "" {
-		return false
+func (d *Daemon) provisioningHeld(gameID string) (bool, error) {
+	if d == nil || d.Store == nil {
+		if gameID == "" {
+			return false, nil
+		}
+		return false, fmt.Errorf("provisioning hold could not be read")
 	}
-	held, err := d.Store.ProvisioningHeld(gameID)
-	if err == nil && held {
-		return true
-	}
-	if canonical, ok := d.Store.ResolveGameAlias(gameID); ok && canonical != gameID {
-		held, err = d.Store.ProvisioningHeld(canonical)
-		return err == nil && held
-	}
-	return false
+	return d.Store.ProvisioningBlocks(gameID)
 }
 
-// ReleaseProvisioning clears the hold and lets this game sync. It syncs only
-// this game. Other games are not paused and are not part of the release.
-// A second call is a no-op and does not sync again.
+// provisioningBlocks is true when the game is held or the hold cannot be
+// read. Callers that would otherwise sync, watch, or upload must use this
+// and not a bare false.
+func (d *Daemon) provisioningBlocks(gameID string) bool {
+	held, err := d.provisioningHeld(gameID)
+	if err != nil {
+		if d.Log != nil {
+			d.Log.Log("warn", fmt.Sprintf("treating %s as not ready to sync: provisioning hold could not be read: %v", gameID, err))
+		}
+		return true
+	}
+	return held
+}
+
+// ReleaseProvisioning clears the hold and starts watching. It does not sync.
+// SyncGame would contact every online peer. The caller syncs after it has
+// released only the peers that should converge. A second call is a no-op.
 func (d *Daemon) ReleaseProvisioning(gameID string) (bool, error) {
 	game, err := d.Store.GetGame(gameID)
 	if err != nil {
@@ -975,15 +985,12 @@ func (d *Daemon) ReleaseProvisioning(gameID string) (bool, error) {
 		!errors.Is(err, watcher.ErrStopped) && !errors.Is(err, watcher.ErrSaveFolderMissing) {
 		d.Log.Log("warn", fmt.Sprintf("could not watch %q after release: %v", game.Name, err))
 	}
-	d.P2P.GoSync(func(ctx context.Context) {
-		syncCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
-		defer cancel()
-		if _, err := d.P2P.SyncGame(syncCtx, gameID); err != nil &&
-			!errors.Is(err, syncengine.ErrPaused) && !errors.Is(err, syncengine.ErrHeld) &&
-			!errors.Is(err, syncengine.ErrProvisioning) {
-			d.Log.Log("info", fmt.Sprintf("sync after releasing %q: %v", game.Name, err))
-		}
-	})
+	// Do not SyncGame here. That call contacts every online peer and can
+	// spread one endpoint's save to another before the caller has released
+	// only the pair it means to converge. The caller syncs explicitly.
+	// A peer that is still held still refuses, so a later reconcile cannot
+	// move that peer's files.
+	d.Log.Log("info", fmt.Sprintf("released %q; it can sync when asked, and only with peers that are not still being configured", game.Name))
 	return true, nil
 }
 
@@ -1210,7 +1217,7 @@ func (d *Daemon) UntrackGame(gameID string) error {
 		name, savePath = game.Name, game.SavePath
 	}
 	// Read before the delete: the hold row cascades away with the game.
-	held := d.provisioningHeld(gameID)
+	held := d.provisioningBlocks(gameID)
 	if err := d.Store.DeleteGame(gameID); err != nil {
 		return err
 	}
@@ -1250,7 +1257,7 @@ func (d *Daemon) LinkGames(canonicalID, aliasID string) error {
 	if canonicalID == "" || aliasID == "" || canonicalID == aliasID {
 		return fmt.Errorf("invalid link %q -> %q", aliasID, canonicalID)
 	}
-	if d.provisioningHeld(canonicalID) || d.provisioningHeld(aliasID) {
+	if d.provisioningBlocks(canonicalID) || d.provisioningBlocks(aliasID) {
 		return fmt.Errorf("a game still being configured cannot be linked")
 	}
 	if _, err := d.Store.GetGame(canonicalID); err != nil {
@@ -1371,7 +1378,7 @@ func (d *Daemon) UnlinkGame(aliasID string) error {
 // untrackFromPeer mirrors a peer's untrack: remove the game + tombstone it,
 // WITHOUT re-notifying (no loop).
 func (d *Daemon) untrackFromPeer(gameID string) {
-	if d.provisioningHeld(gameID) {
+	if d.provisioningBlocks(gameID) {
 		d.Log.Log("info", fmt.Sprintf("ignored a peer untrack of %q while it is still being configured", gameID))
 		return
 	}
@@ -1467,7 +1474,7 @@ func (d *Daemon) watchGame(gameID, savePath string) error {
 // nobody is covering any more.
 func (d *Daemon) RewatchGame(gameID string) {
 	game, err := d.Store.GetGame(gameID)
-	if err != nil || !game.AutoSync || d.provisioningHeld(gameID) {
+	if err != nil || !game.AutoSync || d.provisioningBlocks(gameID) {
 		return
 	}
 	if err := d.watchGame(game.ID, game.SavePath); err != nil {

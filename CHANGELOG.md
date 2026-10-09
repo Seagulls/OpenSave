@@ -13,9 +13,11 @@ All notable changes to OpenSave are documented here. This project adheres to
   step. The hold survives a daemon restart and is not the ordinary AutoSync
   flag: peers cannot pull or push that game's saves, and releasing one game
   does not sync the rest of the library. `POST /api/games/{id}/release-provisioning`
-  clears it. An explicit game id is accepted only while creating a hold, so
-  two devices can be given the same id without waiting for an offer.
-  See issue #40.
+  clears the hold and does not sync by itself. The caller syncs afterwards,
+  so release does not contact every online peer. A third device that is still
+  held cannot send or receive that game's saves. An explicit game id is
+  accepted only while creating a hold. A failed hold lookup is not treated as
+  "not held". See issue #40.
 
 ## [2.4.1] — 2026-10-02
 

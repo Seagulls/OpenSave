@@ -9,9 +9,10 @@ import (
 	"github.com/opensave/opensave/internal/store"
 )
 
-// handleReleaseProvisioning ends the hold on one game and syncs that game
-// only. It does not pause or sync the rest of the library. A repeat after
-// the hold is gone is a success and does not sync again.
+// handleReleaseProvisioning ends the hold on one game. It does not sync.
+// SyncGame would contact every online peer. The caller syncs after releasing
+// only the peers that should converge. A repeat after the hold is gone is a
+// success and does not sync.
 func (s *Server) handleReleaseProvisioning(w http.ResponseWriter, r *http.Request) {
 	gameID := chi.URLParam(r, "gameId")
 	released, err := s.Daemon.ReleaseProvisioning(gameID)

@@ -230,19 +230,14 @@ func (e *Engine) SyncBusy(gameID string) bool {
 	return e.activeSyncs[gameID] || e.pendingSyncs[gameID] || e.followUps[gameID] > 0
 }
 
-func (e *Engine) provisioningHeld(gameID string) bool {
-	if e == nil || e.Store == nil || gameID == "" {
-		return false
+func (e *Engine) provisioningHeld(gameID string) (bool, error) {
+	if e == nil || e.Store == nil {
+		if gameID == "" {
+			return false, nil
+		}
+		return false, fmt.Errorf("provisioning hold could not be read")
 	}
-	held, err := e.Store.ProvisioningHeld(gameID)
-	if err == nil && held {
-		return true
-	}
-	if canonical, ok := e.Store.ResolveGameAlias(gameID); ok && canonical != gameID {
-		held, err = e.Store.ProvisioningHeld(canonical)
-		return err == nil && held
-	}
-	return false
+	return e.Store.ProvisioningBlocks(gameID)
 }
 
 func (e *Engine) SyncGame(ctx context.Context, gameID string, onlinePeers []Peer) (map[string]Result, error) {
@@ -259,7 +254,11 @@ func (e *Engine) SyncGame(ctx context.Context, gameID string, onlinePeers []Peer
 	}
 	// A game still being configured does not sync, whichever caller got
 	// here: a watch, a retry, a peer trigger, or a sync asked for by hand.
-	if e.provisioningHeld(gameID) {
+	held, holdErr := e.provisioningHeld(gameID)
+	if holdErr != nil {
+		return nil, fmt.Errorf("%w: %v", ErrProvisioningUnreadable, holdErr)
+	}
+	if held {
 		return nil, ErrProvisioning
 	}
 	e.mu.Lock()

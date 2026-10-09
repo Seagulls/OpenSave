@@ -61,7 +61,7 @@ func (d *Daemon) retryFailedUploads(inCloud []cloud.CloudFile) {
 	}
 	d.Log.Log("info", "cloud: sending again "+what+" that did not go up earlier")
 	for _, p := range send {
-		if id, _, ok := strings.Cut(p.RemoteName, "__"); ok && d.provisioningHeld(id) {
+		if id, _, ok := strings.Cut(p.RemoteName, "__"); ok && d.provisioningBlocks(id) {
 			continue
 		}
 		d.uploads.Add()

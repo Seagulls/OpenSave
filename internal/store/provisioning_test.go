@@ -1,6 +1,7 @@
 package store
 
 import (
+	"fmt"
 	"testing"
 )
 
@@ -82,6 +83,38 @@ func TestCreateHeldGameIsAtomicAndDefaultsExistingGamesClear(t *testing.T) {
 	released, err = s.ReleaseProvisioning("configuring")
 	if err != nil || released {
 		t.Fatalf("second release = %v, %v; want a no-op", released, err)
+	}
+}
+
+func TestProvisioningReadFaultIsNotNotHeld(t *testing.T) {
+	s := openTestStore(t)
+	if err := s.CreateHeldGame(Game{ID: "held-game", Name: "Held", SavePath: "/tmp/held", MaxSnapshots: 20}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AddGameAlias("alias-of-held", "held-game"); err != nil {
+		t.Fatal(err)
+	}
+	blocks, err := s.ProvisioningBlocks("alias-of-held")
+	if err != nil || !blocks {
+		t.Fatalf("alias of a held game blocks=%v err=%v", blocks, err)
+	}
+	blocks, err = s.ProvisioningBlocks("no-such-game")
+	if err != nil || blocks {
+		t.Fatalf("unknown id blocks=%v err=%v; want not held", blocks, err)
+	}
+
+	s.SetProvisioningReadFault(fmt.Errorf("injected hold read failure"))
+	blocks, err = s.ProvisioningBlocks("held-game")
+	if err == nil || blocks {
+		t.Fatalf("faulty read blocks=%v err=%v; a failed read must be an error, not held=false", blocks, err)
+	}
+	if _, err := s.ProvisioningHeldSet(); err == nil {
+		t.Fatal("held set succeeded while reads were faulted")
+	}
+	// The game row itself is still readable. That is the fail-open shape:
+	// the hold query fails and a caller that ignores the error would sync.
+	if _, err := s.GetGame("held-game"); err != nil {
+		t.Fatalf("fault leaked into game reads: %v", err)
 	}
 }
 

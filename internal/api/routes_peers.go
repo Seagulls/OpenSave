@@ -271,7 +271,12 @@ func (s *Server) handleSyncAll(w http.ResponseWriter, r *http.Request) {
 	}
 	results := map[string]any{}
 	for _, g := range games {
-		if s.Daemon.StoreProvisioningHeld(g.ID) {
+		held, holdErr := s.Daemon.StoreProvisioningHeld(g.ID)
+		if holdErr != nil {
+			results[g.ID] = map[string]string{"status": "error", "reason": "provisioning-unreadable", "error": holdErr.Error()}
+			continue
+		}
+		if held {
 			results[g.ID] = map[string]string{"status": "skipped", "reason": "provisioning"}
 			continue
 		}

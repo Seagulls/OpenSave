@@ -13,11 +13,69 @@ import (
 // leave a tracked game that the next launch will sync. Existing games have
 // no row and are left alone. See migrations/0038_game_provisioning_holds.sql.
 
-// ProvisioningHeld reports whether gameID is still being configured.
-// An unknown id is not held.
-func (s *Store) ProvisioningHeld(gameID string) (bool, error) {
+// SetProvisioningReadFault makes later hold lookups fail with err while
+// every other table still answers. Pass nil to clear it. Production never
+// sets this; it exists so a test can prove a failed read is not "not held".
+func (s *Store) SetProvisioningReadFault(err error) {
+	if s == nil {
+		return
+	}
+	s.faultMu.Lock()
+	s.provisioningReadFault = err
+	s.faultMu.Unlock()
+}
+
+func (s *Store) provisioningFault() error {
+	if s == nil {
+		return fmt.Errorf("provisioning hold could not be read")
+	}
+	s.faultMu.Lock()
+	defer s.faultMu.Unlock()
+	return s.provisioningReadFault
+}
+
+// ProvisioningBlocks reports whether gameID must not sync. An unknown id is
+// not held. An alias of a held game is held. A failed read is an error, never
+// a quiet false: callers must not serve, watch, or sync when this fails.
+func (s *Store) ProvisioningBlocks(gameID string) (bool, error) {
+	if s == nil {
+		return false, fmt.Errorf("provisioning hold could not be read")
+	}
 	if gameID == "" {
 		return false, nil
+	}
+	if err := s.provisioningFault(); err != nil {
+		return false, err
+	}
+	held, err := s.ProvisioningHeld(gameID)
+	if err != nil || held {
+		return held, err
+	}
+	var canonical string
+	err = s.db.Get(&canonical, `SELECT game_id FROM game_aliases WHERE alias_id = ?`, gameID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("provisioning hold alias %s: %w", gameID, err)
+	}
+	if canonical == "" || canonical == gameID {
+		return false, nil
+	}
+	return s.ProvisioningHeld(canonical)
+}
+
+// ProvisioningHeld reports whether gameID is still being configured.
+// An unknown id is not held. A database error is returned, not treated as false.
+func (s *Store) ProvisioningHeld(gameID string) (bool, error) {
+	if s == nil {
+		return false, fmt.Errorf("provisioning hold could not be read")
+	}
+	if gameID == "" {
+		return false, nil
+	}
+	if err := s.provisioningFault(); err != nil {
+		return false, err
 	}
 	var one int
 	err := s.db.Get(&one, `SELECT 1 FROM game_provisioning_holds WHERE game_id = ?`, gameID)
@@ -33,6 +91,12 @@ func (s *Store) ProvisioningHeld(gameID string) (bool, error) {
 // ProvisioningHeldSet is every game currently held, for callers that walk
 // the library and must not query once per game.
 func (s *Store) ProvisioningHeldSet() (map[string]struct{}, error) {
+	if s == nil {
+		return nil, fmt.Errorf("provisioning hold could not be read")
+	}
+	if err := s.provisioningFault(); err != nil {
+		return nil, err
+	}
 	var ids []string
 	if err := s.db.Select(&ids, `SELECT game_id FROM game_provisioning_holds`); err != nil {
 		return nil, fmt.Errorf("list provisioning holds: %w", err)

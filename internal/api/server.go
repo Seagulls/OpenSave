@@ -514,6 +514,19 @@ func (s *Server) gamesPayload() map[string]any {
 	return out
 }
 
+// provisioningHoldField is true when the game is held or the hold cannot be
+// read. A failed read must not be reported as false.
+func (s *Server) provisioningHoldField(id string) bool {
+	if s == nil || s.Daemon == nil {
+		return true
+	}
+	held, err := s.Daemon.StoreProvisioningHeld(id)
+	if err != nil {
+		return true
+	}
+	return held
+}
+
 func (s *Server) gamePayload(g store.Game) map[string]any {
 	branchNames, _ := s.Daemon.Store.ListBranches(g.ID)
 	branches := map[string]any{}
@@ -551,7 +564,7 @@ func (s *Server) gamePayload(g store.Game) map[string]any {
 		"savePath":           g.SavePath,
 		"activeBranch":       g.ActiveBranch,
 		"autoSync":           g.AutoSync,
-		"provisioningHold":   s.Daemon != nil && s.Daemon.StoreProvisioningHeld(g.ID),
+		"provisioningHold":   s.provisioningHoldField(g.ID),
 		"maxSnapshots":       g.MaxSnapshots,
 		"maxManualSnapshots": g.MaxManualSnapshots,
 		"appId":              g.AppID,

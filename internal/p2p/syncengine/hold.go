@@ -75,6 +75,15 @@ const ProvisioningMessage = "This device is still configuring this game and is n
 // configured. It is not ErrHeld: that one is the emptied-save question.
 var ErrProvisioning = errors.New("this game is still being configured and is not synced until that finishes")
 
+// ProvisioningUnreadableMessage is what this device says when it cannot tell
+// whether a game is still being configured. It is not "not found" and it is
+// not permission to send or receive the save.
+const ProvisioningUnreadableMessage = "This device could not read whether this game is still being configured, so it is not sending or receiving its saves"
+
+// ErrProvisioningUnreadable is a failed hold lookup. It must not be treated
+// as "not held".
+var ErrProvisioningUnreadable = errors.New("could not read whether this game is still being configured")
+
 func isProvisioning(err error) bool {
 	return err != nil && strings.Contains(err.Error(), ProvisioningMessage)
 }

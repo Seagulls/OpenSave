@@ -70,7 +70,12 @@ func (s *Server) handleAddGameRoot(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		path = abs
-		if s.Daemon.StoreProvisioningHeld(gameID) {
+		held, holdErr := s.Daemon.StoreProvisioningHeld(gameID)
+		if holdErr != nil {
+			writeError(w, http.StatusServiceUnavailable, "could not read whether this game is still being configured")
+			return
+		}
+		if held {
 			if err := daemon.RefuseSymlinkSave(path); err != nil {
 				writeError(w, http.StatusBadRequest, err.Error())
 				return

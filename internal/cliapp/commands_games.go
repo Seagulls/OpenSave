@@ -83,7 +83,10 @@ func cmdGame(d *daemon.Daemon, args []string) int {
 	// Re-watch so a path or auto-sync change takes effect immediately rather
 	// than at the next restart.
 	d.Watcher.Unwatch(game.ID)
-	if game.AutoSync && !d.StoreProvisioningHeld(game.ID) {
+	held, holdErr := d.StoreProvisioningHeld(game.ID)
+	if holdErr != nil {
+		d.Log.Log("warn", "not watching "+game.ID+": provisioning hold could not be read: "+holdErr.Error())
+	} else if game.AutoSync && !held {
 		if err := d.Watcher.Watch(game.ID, game.SavePath); err != nil {
 			d.Log.Log("warn", "re-watch after config change failed: "+err.Error())
 		}
