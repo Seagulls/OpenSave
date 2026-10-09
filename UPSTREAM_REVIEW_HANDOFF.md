@@ -1,181 +1,99 @@
 # OpenSave upstream review handoff
 
-Evidence for independent review before any upstream PR. This file is on
-`review/upstream-handoff` only. It is not part of either code branch.
+Updated after the staged-release and mixed-version tranche. This file stays
+on `review/upstream-handoff` only. It is not part of either code branch.
 
 No Steam Deck, Bazzite, Raspberry Pi, installed daemon, or real save was
 contacted. No upstream PR was opened. `Seagulls/Savesync` was not modified.
+No force-push.
 
-## 1. Branch and commit table
+Toolchain for every command below: `go version go1.27.1-X:nodwarf5 linux/amd64`.
+`go.mod` requests `go 1.26.4`. `GOTOOLCHAIN=auto` stayed on 1.27.1. Go 1.26.4
+was not downloaded. Linux only. No Windows or macOS run.
+
+## 1. Branch tips
 
 | Branch | Base | Tip | Pushed |
 | --- | --- | --- | --- |
-| `feat/atomic-safe-game-provisioning` | `346d9bda0749fb57b48fd266f13e535af80f0285` | `1508845f93bf1f9affe3259c1b35a786fe183fb2` | `Seagulls/OpenSave` only |
-| `fix/agreed-base-precedes-mtime` | same base | `feedc3b7dfcb21a1f913ad9e88ebb8109d300db5` | `Seagulls/OpenSave` only |
-| `review/upstream-handoff` | provisioning tip | this commit | docs only |
+| `feat/atomic-safe-game-provisioning` | `346d9bda0749fb57b48fd266f13e535af80f0285` | `af05e652f050404f8dcdb99f93a2e49ab9bb9891` | `Seagulls/OpenSave` only |
+| `fix/agreed-base-precedes-mtime` | same base | `8d893ff8bd12acf7f53de3f84783d7fe9849dbff` | `Seagulls/OpenSave` only |
+| `review/upstream-handoff` | docs only | this commit | docs only |
 
-The two code branches are independent. They both start at upstream `main`
-`346d9bda` (v2.4.1). Neither contains the other.
+Previous reviewed tips were `1508845` and `feedc3b`. Both are ancestors of the
+tips above. Ancestry from `346d9bda` was checked before editing.
 
 Compare:
 
 - https://github.com/Liquid-co/OpenSave/compare/main...Seagulls:feat/atomic-safe-game-provisioning
 - https://github.com/Liquid-co/OpenSave/compare/main...Seagulls:fix/agreed-base-precedes-mtime
 
-Throwaway combined tree, **not pushed**, not an upstream PR:
-
-- path: `/tmp/kilo/opensave-combined`
-- local SHA: `23914b4b70b852a71aa9bd52517f0e7bcab61943`
-- parents: provisioning `1508845` and mtime `feedc3b`
-- only conflict was `CHANGELOG.md`, resolved by keeping both notes
-
-Provisioning commits:
+Provisioning commits after stock:
 
 1. `4b50182` store: persist a per-game provisioning hold
 2. `e840f37` sync: keep a held game out of every transfer path
 3. `3b760e2` test: prove a held game survives restart and one-sided release
 4. `1508845` sync: fail closed when a provisioning hold cannot be read
+5. `af05e65` api: stage a hold release without turning AutoSync on
 
-Mtime commits:
+Mtime commits after stock:
 
 1. `feedc3b` sync: let an agreed base beat a misleading mtime
+2. `8d893ff` test: cover the other agreed-base direction and a deletion
 
-Toolchain: `go version go1.27.1-X:nodwarf5 linux/amd64`. `go.mod` requests
-`go 1.26.4`. `GOTOOLCHAIN=auto` stayed on 1.27.1 because it is newer. Tests
-were run with `GOTOOLCHAIN=local`. Go 1.26.4 was not downloaded.
+Throwaway combined tree, **not pushed**:
 
-## 2. Exact code impact
+- path: `/tmp/kilo/opensave-combined2`
+- local SHA: `d7ef7c67490bdf6397a5d9f626d045de90c9cfcf`
+- parents: `af05e65` and `8d893ff`
+- only conflict: `CHANGELOG.md`, both notes kept
 
-### Provisioning (issue #40)
+## 2. Requirement matrix
 
-Schema: `internal/store/migrations/0038_game_provisioning_holds.sql`.
+| Item | Status |
+| --- | --- |
+| Create/place a game that cannot sync until released | Supported. `provisioningHold: true` or `autoSync: false` on create/place. Omitted flags are unchanged. |
+| `autoSync: false` at creation vs ordinary AutoSync | Deliberately the hold, not a weaker flag. A weaker flag does not stop a peer pulling the manifest. |
+| Later enable via ordinary PATCH | Unsupported on purpose. `PATCH /api/games/{id}` cannot clear the hold, and a held game's `autoSync` column is not changed. Tested. |
+| Intentional unblock | Supported. `POST /api/games/{id}/release-provisioning`. Empty body enables AutoSync. `{"autoSync": false}` or CLI `--no-autosync` does not. Repeat after the hold is gone does not change AutoSync. |
+| Default release means "no transfer until explicit sync" | **Not true.** Witness: `TestProvisioningHold_DefaultReleaseLetsReconcileSync`. Reconcile/`SyncAllGames` copies bytes after a default release. |
+| Staged release | Supported and tested. Hold cleared, AutoSync left off, reconcile/restart/file write do not copy. Explicit `POST /sync` does. A still-held third peer refuses. Both writer orders. |
+| Peer-targeted `SyncGame(game, peer)` | Unsupported. Explicit sync still contacts every online peer. Unheld peers participate. Held peers refuse. Do not add this in this PR. |
+| Same canonical id on the Bridge without an offer | Supported as a local API (`id` only while held). Not automatic. SaveSync must call it. |
+| Convert an already tracked game into a hold | Unsupported. Fails, leaves AutoSync and bytes alone. |
+| Mixed stock client to patched held server | Supported for the cases run. Manifest 409, delete 409, stock sync status `error`, files unchanged. |
+| Stock daemon on a patched database | **Unsafe.** Stock has no hold field and serves the held manifest (HTTP 200, file hash included). |
+| Agreed-base beats misleading mtime | Supported when one whole manifest equals the confirmed base. Both directions, primary and named root. |
+| Missing or stale agreed base | Deliberately still mtime. Not #29/#30. |
+| Hardware | Untested. |
 
-```sql
-CREATE TABLE game_provisioning_holds (
-    game_id TEXT PRIMARY KEY REFERENCES games(id) ON DELETE CASCADE,
-    held_at TEXT NOT NULL
-);
-```
+## 3. Safety entry points
 
-A table, not a column on `games`. Older builds `SELECT *` into `games` and a
-new column breaks them. No row means not held. Existing games are unchanged.
-Downgrade: an older build ignores the table. The rows remain. Upgrading again
-still sees them. A downgraded build will sync a held game, because it does
-not know the table. That is a mixed-version limit, not a silent migration of
-existing games.
+Provisioning hold, fail closed on a read error:
 
-Public API, opt-in only:
+- `internal/store/provisioning.go` `ProvisioningBlocks`, `ProvisioningHeldSet`
+- `internal/p2p/engine.go` `refuseIfProvisioning`, `provisioningServeRefusal`, `SyncAllGames` returns if the set cannot be read
+- `internal/p2p/syncengine/engine.go` `SyncGame` returns `ErrProvisioningUnreadable` before `FetchManifest`
+- `internal/p2p/routes.go` and `wanclient_handlers.go` manifest, blocks, delete, snapshot
+- `internal/daemon/daemon.go` `provisioningBlocks` for watch, cloud upload, untrack notify, link
+- `internal/api/server.go` `provisioningHoldState`: failed read sets `provisioningHold=true` and `provisioningHoldUnknown=true`
 
-- `POST /api/games` accepts optional `provisioningHold: true`, optional
-  `autoSync: false` (pointer; omitted is unchanged), and optional `id` only
-  when a hold is requested. `id` must be `ValidExplicitGameID` (the same slug
-  `SlugifyGameID` would produce, max 128).
-- `POST /api/offered-games/{id}/place` accepts the same two flags. Omitted,
-  the body is still `{"path": ...}` and placement syncs as today.
-- `POST /api/games/{id}/release-provisioning` returns
-  `{"id","released","alreadyReleased"}`. It clears the hold and sets
-  `auto_sync=1` in one transaction. It does **not** call `SyncGame`.
-- Game JSON includes `provisioningHold`. A failed read is reported as true,
-  not false.
-- CLI: `opensave add --hold [--id slug] <name> <path>`,
-  `opensave offers place --hold <id> <folder>`,
-  `opensave game <id> release`.
+Release:
 
-Why this is not `autoSync: false`: that flag only stops this device from
-starting a sync. A peer that knows the id still fetches the manifest and can
-pull or delete. Pause is in memory and dies on `daemon.New` + `Start`. The
-hold is checked on outbound sync, reconcile, retry, watch, cloud publish, and
-inbound manifest, blocks, delete, and snapshot download. A failed SQLite read
-is an error. Callers refuse. They do not treat it as not held.
+- `internal/store/provisioning.go` `ReleaseProvisioningMode` — one transaction, no-op if not held
+- `internal/daemon/daemon.go` `ReleaseProvisioningMode` — watches only when AutoSync is enabled; never calls `SyncGame`
+- `internal/api/routes_provisioning.go` empty body vs `{"autoSync": false}`
+- `internal/api/routes.go` `handleUpdateGame` restores `autoSync` while held
+- `internal/cliapp/commands_games.go` `release --no-autosync`; `set auto-sync` errors while held
 
-Release does not fan out. `SyncGame` contacts every online peer. The caller
-syncs after releasing only the peers that should converge. A peer that is
-still held refuses, so a later reconcile cannot move that peer's files.
+Agreed base:
 
-An already tracked game cannot be converted into a hold. The call fails and
-leaves `AutoSync` and the bytes alone.
+- `internal/p2p/syncengine/decision.go` around the differing-hash switch: whole-manifest base is checked before `MtimeMs`
+- `internal/p2p/syncengine/multiroot.go` `syncOneRoot` resolves `GetAgreedHashForRoot` and passes that filtered base to `ComputeWithBase`
+- `TestANewerSideStillWinsRegardlessOfTheBase` is still present. Its expected outcome is the correction, not the old mtime win.
 
-### Agreed base (issue #41)
+## 4. Red on stock, green on the mtime tip
 
-`ComputeWithDeletions` ranked differing files by `MtimeMs` before asking
-whether one whole manifest was still `baseHash`. A touched copy of the agreed
-base could overwrite the only edit. The new cases run first: if one manifest
-hash equals the base and the other does not, the changed side wins. Equal
-mtime ties still use the base. A missing or stale base still uses mtime.
-That limit is pinned, not papered over.
-
-`syncOneRoot` used to call `Compute` with an empty base, then load
-`GetAgreedHashForRoot` only for `DetectConflict`. It now resolves that same
-base and passes it to `ComputeWithBase`.
-
-`TestANewerSideStillWinsRegardlessOfTheBase` was kept and its expected
-outcome reversed. It used to require the newer mtime to win even when that
-side was the agreed base. That was the bug.
-
-This is not #29 / #30. No version vector, no new conflict policy for two
-sides that both differ from the base.
-
-## 3. Threat and safety matrix
-
-| Scenario | Result | Evidence |
-| --- | --- | --- |
-| Hold read fails, game row still readable | PASS | `TestUnreadableProvisioningHoldDoesNotFetchManifest`: `FetchManifest` calls = 0, error is `ErrProvisioningUnreadable`. `TestSyncAllGamesStopsWhenHoldSetUnreadable`: returns before nil `Sync`. `TestProvisioningReadFaultIsNotNotHeld`. |
-| Partial setup / crash after commit | PASS | `TestProvisioningHold_PairedCreateRestartAndIsolation` restarts via `daemon.New` + `Start` on the same home and port. Hold remains. No pause required. |
-| Alias of a held game | PASS | `TestProvisioningReadFaultIsNotNotHeld` alias blocks. Alias query error is returned, not treated as no alias. |
-| Offered placement with `autoSync: false` | PASS | `TestProvisioningHold_PlaceOfferWithoutSyncing`. Repeat place does not duplicate. |
-| Already tracked game | PASS | `TestProvisioningHold_DoesNotConvertAnExistingGame`. |
-| Peer manifest / blocks / delete | PASS | Same restart test: manifest is `ProvisioningMessage` and does not contain "not found". Delete does not remove the file. WAN serve uses the same refusal. |
-| Unrelated game keeps syncing | PASS | Same restart test writes `UNRELATED-FRESH` and waits for it on the other peer. 100-game test does the same. |
-| Mixed patched/unpatched peer | PARTIAL | `TestStockClientDoesNotTreatProvisioningRefusalAsMissing` shows stock classifiers do not treat the 409/503 body as "not found" or emptied-hold. A live unpatched daemon was not run. An older build that ignores the table will sync a held game. Do not promise mixed-version safety beyond the stock error classifier. |
-| One-sided release | PASS | Restart test releases source only, restarts both, bridge hold remains, no bytes move. |
-| Three-peer star, third still held | PASS | `TestProvisioningHold_StarLeavesHeldEndpointAlone`. Bazzite is not paired with Deck. Release does not copy. Explicit sync converges the released pair. Deck keeps `DECK-ONLY`. Bridge reconcile does not move Deck. |
-| Three-peer divergent writers, no hold | PASS on combined tree | `TestSaveSyncStarDualWriterPreservesBoth` both orders: status `conflict`, each endpoint keeps its unique file. Bridge does not invent a mixture. This is existing conflict handling, not a new policy. |
-| Named roots before release | PASS | `TestProvisioningHold_NamedRootsBeforeRelease`. |
-| Named root agreed-base vs mtime | PASS | `TestAgreedBaseBeatsNewerMtimeOnPrimaryAndExtraRoot` on real daemons. |
-| Absent agreed base | PASS as a limit | `TestBaseFirstRetainsLegacyMtimeWithoutBase`: newer mtime still wins. Not fixed. |
-| Stale agreed base matching neither side | PASS as a limit | `TestStaleAgreedBaseDoesNotOverrideMtime`. Mtime still decides. Not fixed. |
-| Symlink / occupied / duplicate id | PASS | `TestProvisioningHold_RejectsUnsafePathsAndDuplicates`. |
-| Ordinary track unchanged | PASS | `TestProvisioningHold_OrdinaryTrackUnchanged`. |
-| 100 held games, one daemon | PASS | `TestProvisioningHold_HundredGamesStayOneDaemon` (0.84s on the first run). |
-| Full TOCTOU of the filesystem | UNTESTED | Path checks are the existing ones plus a symlink-root refusal on hold. No claim of a full race-free filesystem guarantee. |
-| Hardware | UNTESTED | No device was used. |
-
-## 4. Test evidence
-
-Host: Arch, `go1.27.1-X:nodwarf5`. Commands used `GOTOOLCHAIN=local`.
-
-Provisioning branch `1508845`, before the mtime merge:
-
-```text
-go test -count=1 -timeout 180s -run 'TestProvisioning|TestUnreadable|TestStockClient|TestSyncAllGamesStops' \
-  ./internal/store/ ./internal/p2p/ ./internal/p2p/syncengine/ ./e2e/
-RC=0
-```
-
-Verbose new cases, all PASS:
-
-- `TestProvisioningHold_DoesNotConvertAnExistingGame` 0.02s
-- `TestProvisioningHold_StarLeavesHeldEndpointAlone` 0.22s
-- `TestSyncAllGamesStopsWhenHoldSetUnreadable` 0.02s
-- `TestUnreadableProvisioningHoldDoesNotFetchManifest` 0.02s
-- `TestStockClientDoesNotTreatProvisioningRefusalAsMissing` 0.00s
-
-Earlier on `3b760e2`, before the fail-closed commit:
-
-```text
-go test -count=1 -timeout 300s -v -run 'TestProvisioningHold_' ./e2e
-RC=0
-go test -race -count=1 -timeout 300s -run 'TestProvisioningHold_|TestCreateHeldGame|TestValidExplicitGameID' ./e2e/ ./internal/store/
-RC=0
-go test ./... -timeout 2700s
-```
-
-That full run passed every package that has tests, including `./e2e` (765s)
-and `./internal/p2p`. `cmd/opensave-app` did not compile:
-`//go:embed all:frontend/dist` and `frontend/dist` is not in the clone.
-Pre-existing. The full `./...` run was **not** repeated on `1508845`.
-
-Mtime branch, red then green. On unmodified `346d9bda`:
+On unmodified `346d9bda`:
 
 ```text
 go test -count=1 -timeout 60s -run 'TestBaseFirstPreventsMtimeRollback' ./internal/p2p/syncengine/
@@ -184,160 +102,175 @@ local changed, remote base has later mtime: FilesToPull:[slot.sav] want push
 remote changed, local base has later mtime: FilesToPush:[slot.sav] want pull
 ```
 
-After `feedc3b`:
+On `8d893ff` the same test passes, as do both daemon directions. This does not
+prove the Crash 4 hardware incident. It proves the source decision.
+
+## 5. Commands and results
+
+Provisioning tip `af05e65`:
 
 ```text
-go test -count=1 -timeout 120s -run 'TestBaseFirst|TestANewerSideStillWins|TestAnMtimeTie' ./internal/p2p/syncengine/
+GOTOOLCHAIN=auto go test -count=1 -timeout 20m ./internal/p2p/... ./internal/store/... ./internal/daemon/... ./internal/api/... ./internal/delta/...
 RC=0
-go test -count=1 -timeout 180s -run 'TestAgreedBaseBeatsNewerMtimeOnPrimaryAndExtraRoot' ./e2e/
+GOTOOLCHAIN=auto go test -count=1 -timeout 25m ./e2e/...
+RC=0   (755.886s)
+GOTOOLCHAIN=auto go test -race -count=1 -timeout 25m -run 'TestProvisioning|TestUnreadable|TestStockClient|TestSyncAllGamesStops' ./e2e/ ./internal/store/ ./internal/p2p/ ./internal/p2p/syncengine/
 RC=0
-go test -count=1 -timeout 300s ./internal/p2p/syncengine/ ./internal/delta/ ./internal/p2p/
+GOTOOLCHAIN=auto go test -count=3 -timeout 10m -run 'TestProvisioningHold_StagedRelease|TestProvisioningHold_DefaultRelease|TestUnreadableProvisioning' ./e2e/ ./internal/p2p/syncengine/
+RC=0
+GOTOOLCHAIN=auto go vet ./internal/p2p/... ./internal/store/... ./internal/daemon/... ./internal/api/... ./internal/delta/...
 RC=0
 ```
 
-Combined local tree `23914b4` (not pushed):
+Mtime tip `8d893ff`:
 
 ```text
-gofmt -l <changed files>   RC=0
-go vet ./internal/p2p/... ./internal/daemon/ ./internal/store/ ./internal/api/ ./internal/delta/
+GOTOOLCHAIN=auto go test -count=1 -timeout 20m ./internal/p2p/... ./internal/store/... ./internal/daemon/... ./internal/api/... ./internal/delta/...
+RC=1
+```
+
+The only failure is `TestSessionNamesTheSnapshotAlreadyTaken` in
+`internal/daemon`. It also failed on unmodified `346d9bda` in the previous
+tranche. This branch does not touch `sessions.go`. Re-run on this tip also
+failed. Not introduced here. Not fixed here.
+
+```text
+GOTOOLCHAIN=auto go test -count=1 -timeout 25m ./e2e/...
+RC=0   (763.827s)
+GOTOOLCHAIN=auto go test -race -count=1 -timeout 20m -run 'TestAgreedBase|TestBaseFirst|TestAnMtimeTie|TestANewerSide' ./e2e/ ./internal/p2p/syncengine/
 RC=0
-go test -count=1 -timeout 300s -run 'TestProvisioningHold_|TestAgreedBaseBeatsNewerMtime|TestBaseFirst|TestANewerSideStillWins' \
-  ./e2e/ ./internal/p2p/syncengine/
+GOTOOLCHAIN=auto go test -count=3 -timeout 10m -run 'TestBaseFirstPreventsMtimeRollback|TestAgreedBase' ./internal/p2p/syncengine/ ./e2e/
+RC=0
+go vet (same packages) RC=0
+```
+
+`go test ./...` is still blocked for `cmd/opensave-app` by
+`//go:embed all:frontend/dist`. `frontend/dist` is not in the clone. Not
+stubbed. Not counted green.
+
+Mixed-version log, two processes, isolated `HOME`, ports 18421/18422/18423:
+
+`/home/guy/Documents/ai/Savesync-logs/savesync-grok-opensave-mixed-version.log`
+
+```text
+MANIFEST_STATUS=409 configuring message, not "not found"
+DELETE_STATUS=409, patched file still ONLY-PATCHED
+stock POST /sync results status=error, STOCK_FILE=ONLY-STOCK, PATCHED_FILE=ONLY-PATCHED
+downgrade manifest HTTP 200 with slot.sav hash af49b721...
+```
+
+Binaries used for that probe, not install candidates:
+
+```text
+opensave-stock    cfe071e0c4c543e253e1bd9adf6f7e384f85c39e77561d4dec5f692af041f22c
+opensave-patched  4c74af3d617cc856dd9af9d916e5b38cbd8d4fe980a055a7038903a98f6a8c23
+```
+
+Combined checkout CLI builds, not installed:
+
+```text
+linux/amd64 fc3c59465b85b93878138ec0f42c7cf46ed77e2d677201c79bef6bfd5c8c8525
+linux/arm64 5ff686835a8608e481e6d8af0447f5547dd9890fca693c462d9fe01a52aad64a
+```
+
+## 6. Combined checkout
+
+`/tmp/kilo/opensave-combined2` at `d7ef7c6`, not pushed.
+
+```text
+go test -count=1 -timeout 15m -run 'TestSaveSyncStar|TestProvisioningHold_|TestAgreedBase|TestBaseFirst' ./e2e/ ./internal/p2p/syncengine/
+RC=0
+go test -count=1 -timeout 8m -v -run '^TestSaveSyncStar' ./e2e
 RC=0
 ```
 
-Log: `/tmp/kilo/opensave-review-logs/combined-focused.log`
+Log: `/home/guy/Documents/ai/Savesync-logs/savesync-grok-opensave-three-node.log`
 
-Three-node fixtures copied from `Seagulls/Savesync` `tests/native/three_node_integrity*_test.go`
-into the throwaway `e2e/` only. SaveSync was not edited. Loopback daemons only.
-
-```text
-go test -count=1 -timeout 480s -v -run '^TestSaveSyncStar' ./e2e
-RC=0
-```
-
-- `TestSaveSyncStarOfflineRoundTrip` PASS, files=4, Bridge carried the hop
+- `TestSaveSyncStarOfflineRoundTrip` PASS, files=4
 - `TestSaveSyncStarDualWriterPreservesBoth` PASS both orders, status=conflict, unique files kept
 - `TestSaveSyncStarIdleBridgeMtimeCannotRollback` PASS
 
-Log: `/tmp/kilo/opensave-review-logs/three-node.log`
+Three-node files were copied into the throwaway `e2e/` only. SaveSync was not edited.
 
-Race: the provisioning e2e and store tests were raced on `3b760e2`, not
-re-raced after `1508845`. Not a full `-race ./...`.
-
-Linux only. No Windows or macOS run. Synthetic fixtures only.
-
-## 5. Known blockers and remaining risk
-
-1. **Mixed-version daemon, medium.** An unpatched peer does not read
-   `game_provisioning_holds`. If it has the game and this build is not the
-   one serving, it will sync. Our patched serve path returns 409/503 that
-   stock classifiers do not treat as deletion. That classifier test is not a
-   two-version process test.
-2. **Absent or stale agreed base, medium, intentional.** Mtime still wins.
-   `TestBaseFirstRetainsLegacyMtimeWithoutBase` and
-   `TestStaleAgreedBaseDoesNotOverrideMtime` pin this. #29/#30 are not in
-   this change. Do not claim the Crash 4 hardware incident was proved to be
-   this branch. Only the source decision is reproduced.
-3. **Release then reconcile, low if sequencing is followed.** After release,
-   periodic reconcile syncs that game with every online peer that is not
-   held. SaveSync must leave the other endpoint held until the first pair has
-   converged. OpenSave has no peer-targeted sync. Do not release all three
-   and expect this PR to choose a winner. The dual-writer fixture shows
-   ordinary conflict handling preserves unique files; that is not a new
-   guarantee invented here.
-4. **Full suite not re-run on `1508845` or `feedc3b`, low.** Focused packages
-   and the three-node set passed on the combined tree. `cmd/opensave-app`
-   still cannot be tested without `frontend/dist`.
-5. **Filesystem TOCTOU, low, untested as a proof.** No claim.
-
-No red test was skipped. The mtime reproducing test failed on stock and
-passes on `feedc3b`.
-
-## 6. Draft PR text
+## 7. Draft PR text
 
 Do not open these yet.
 
-### PR 1 — issue #40
+### Issue #40
 
 Title: Hold a new game until it is explicitly released
 
 ```markdown
 Fixes #40
 
-`TrackGame` persists `AutoSync=true` and can sync before a later update.
-`AutoSync=false` only stops this device from starting a sync. A paired
-device can still request the manifest. Pause does not survive `daemon.New`.
+`autoSync: false` after a normal track is not safe. A paired device can still
+request the manifest, and pause does not survive `daemon.New`. Creation and
+offer placement therefore record a provisioning hold in the same transaction
+as the game when the caller passes `provisioningHold: true` or `autoSync: false`.
+Omitted, behaviour is unchanged.
 
-This adds one table, `game_provisioning_holds`, written in the same
-transaction as the game. Older builds that `SELECT *` from `games` keep
-working. No row means not held.
+A PATCH cannot clear that hold. The unblock is
+`POST /api/games/{id}/release-provisioning`.
 
-- `POST /api/games` and `POST /api/offered-games/{id}/place` accept
-  `provisioningHold: true` or `autoSync: false`. Omitted, behaviour is unchanged.
-- An explicit id is accepted only while creating a hold, so the other device
-  can be registered without an offer and without sending save bytes.
-- While held, that game is excluded from watch, reconcile, retry, direct sync,
-  inbound manifest/blocks/delete, and snapshot download. A failed hold read
-  is refused, not treated as not held.
-- `POST /api/games/{id}/release-provisioning` clears the hold and does not
-  sync. `SyncGame` would contact every online peer.
+- Empty body turns AutoSync on. Reconcile and a peer coming online can then
+  sync that game with every online peer that is not still held. Release itself
+  does not call SyncGame, but that is not "nothing moves until an explicit sync".
+- `{"autoSync": false}` clears the hold and leaves AutoSync off. Reconcile,
+  reconnect and the watcher do not sync. The caller syncs explicitly, then
+  turns AutoSync on. An explicit sync still contacts every online peer.
+  A peer that is still held refuses.
 
-Tests cover restart, one-sided release, a three-peer star with the third
-peer still held, offer placement, symlink and occupied paths, named roots,
-a failed hold read that must not call FetchManifest, and unchanged ordinary
-tracking.
+An explicit id is accepted only while creating a hold, so the other device
+can be registered without an offer. This does not find or create that id on
+another machine by itself. A failed hold read is not reported as an ordinary
+false (`provisioningHoldUnknown`).
+
+A stock build serving this database will serve the held save. Do not downgrade
+a device that has a held game.
 ```
 
-### PR 2 — issue #41
+### Issue #41
 
 Title: Prefer the agreed save base over a misleading mtime
 
 ```markdown
 Fixes #41
 
-`DetectConflict` already treats one side that still holds `agreedHash` as a
-one-sided edit. `ComputeWithDeletions` then ranked the file by `MtimeMs`
-first, so a touched copy of the agreed base could overwrite the only edit.
-Named extra locations called `Compute` with an empty base even though they
-already loaded `GetAgreedHashForRoot` for conflict detection.
-
-If one whole manifest equals the confirmed base and the other does not, the
-changed side wins. Equal mtime ties are unchanged. A missing or stale base
-still uses mtime; that limit is tested, not hidden. This is not the version
+When one whole manifest is still the confirmed common version and the other
+has changed, the changed side wins even if the unchanged files have a later
+timestamp. Named extra locations use that same agreed hash. A missing or
+stale base still uses mtime; that limit is tested. This is not the version
 vector work in #29 / #30.
 
-Red on `346d9bda`: `TestBaseFirstPreventsMtimeRollback` pulled or pushed the
-newer-mtime base. Green on this branch, including a two-daemon primary and
-extra-root case.
+Red on `346d9bda`: `TestBaseFirstPreventsMtimeRollback` followed the newer
+mtime. Green on this branch, including both directions on a primary folder
+and a named root.
 ```
 
-## 7. Reproduction
-
-These leave the shell open and print `RC`. They do not SSH or touch live saves.
-
-```bash
-set -o pipefail
-cd /home/guy/Documents/ai/codex/projects/OpenSave-upstream-pr
-git fetch fork feat/atomic-safe-game-provisioning
-git rev-parse HEAD; echo RC:$?
-git merge-base --is-ancestor 346d9bda0749fb57b48fd266f13e535af80f0285 HEAD; echo ancestor_rc:$?
-GOTOOLCHAIN=local go test -count=1 -timeout 300s -run 'TestProvisioningHold_|TestUnreadable|TestSyncAllGamesStops|TestStockClient' ./e2e/ ./internal/p2p/ ./internal/p2p/syncengine/ ./internal/store/ 2>&1 | tee /tmp/kilo/opensave-review-logs/repro-provisioning.log
-echo RC:$?
-```
-
-```bash
-set -o pipefail
-cd /home/guy/Documents/ai/codex/projects/OpenSave-mtime-pr
-git rev-parse HEAD; echo RC:$?
-GOTOOLCHAIN=local go test -count=1 -timeout 180s -run 'TestBaseFirst|TestANewerSideStillWins|TestAgreedBaseBeatsNewerMtime' ./internal/p2p/syncengine/ ./e2e/ 2>&1 | tee /tmp/kilo/opensave-review-logs/repro-mtime.log
-echo RC:$?
-```
-
-## 8. Recommendation
+## 8. Gate
 
 | Gate | Decision |
 | --- | --- |
-| (a) Independent upstream PR review | **GO** for review of the two fork branches above. Do not open the upstream PRs until that review finishes. |
-| (b) Combined isolated testing | **GO**. Throwaway `23914b4` passed the focused set, vet, and `TestSaveSyncStar*`. That tree is not a PR. |
-| (c) Physical SaveSync hardware testing | **NO-GO**. No device evidence. SaveSync paired-protection guards stay fail-closed. |
+| (a) Issue #41 PR review | **GO** for review. Not a hardware explanation. Pre-existing `TestSessionNamesTheSnapshotAlreadyTaken` fails on this tip and on stock; it is not part of this diff. |
+| (b) Issue #40 PR review | **GO** for review of the hold and staged release. **NO-GO** as unattended SaveSync/Bridge enablement. Default release lets reconcile sync. Explicit sync is not peer-targeted. The Bridge id is not created automatically. |
+| (c) Combined isolated testing | **GO**. Local `d7ef7c6` passed the focused set and `TestSaveSyncStar*`. Not a PR. |
+| (d) Live hardware | **NO-GO**. |
+
+## 9. What to inspect next
+
+1. `ReleaseProvisioningMode` and the empty-body default. Confirm the project lead accepts that default release is not staged.
+2. `handleUpdateGame` restoring `autoSync` while held. Confirm a dashboard round-trip cannot release.
+3. The mixed-version log. Stock-to-patched did not move bytes. Stock serving a patched DB did.
+4. `decision.go` base-before-mtime, and that `TestANewerSideStillWinsRegardlessOfTheBase` was rewritten rather than deleted.
+5. Do not treat #29/#30 as done.
+
+SaveSync integration, contract only, no code in this tranche:
+
+1. Keep `new-protection-paired-topology` fail-closed until this is merged and SaveSync calls it.
+2. Source: `POST /api/games` with an explicit slug, `provisioningHold: true`.
+3. Bridge: the same id and a Bridge-local path. There will be no offer.
+4. Configure roots while held.
+5. Release both with `{"autoSync": false}`. Leave the other endpoint held.
+6. `POST /api/games/{id}/sync` on the source. Compare hashes. The third peer must still be held, because this sync contacts every online peer.
+7. Only then release the third peer, sync, compare, and turn AutoSync on.
+8. Do not downgrade a device that has a held game. Do not PATCH a held game to enable sync.
