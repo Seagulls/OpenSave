@@ -432,6 +432,12 @@ func (s *Server) handleUpdateGame(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		if heldBefore {
+			if err := daemon.RefuseSymlinkSave(abs); err != nil {
+				writeError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+		}
 		game.SavePath = abs
 	}
 	// Cover art: a user-set custom URL is always kept. An empty cover, or

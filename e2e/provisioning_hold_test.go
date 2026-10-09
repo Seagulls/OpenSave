@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -35,10 +36,15 @@ func writeHoldFile(t *testing.T, dir, rel, content string) {
 	}
 }
 
-func readHoldFile(dir, rel string) string {
-	raw, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(rel)))
-	if err != nil {
+func readHoldFile(t *testing.T, dir, rel string) string {
+	t.Helper()
+	path := filepath.Join(dir, filepath.FromSlash(rel))
+	raw, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
 		return ""
+	}
+	if err != nil {
+		t.Fatalf("reading save fixture %q: %v", path, err)
 	}
 	return string(raw)
 }
@@ -83,23 +89,19 @@ func assertHeldQuiet(t *testing.T, source, bridge *testutil.TestDaemon, id, sour
 	source.Daemon.P2P.SyncAllGames(ctx)
 	bridge.Daemon.P2P.PingPairedPeers(ctx)
 	bridge.Daemon.P2P.SyncAllGames(ctx)
-	if _, err := source.Daemon.P2P.Sync.SyncGame(ctx, id, source.Daemon.P2P.OnlinePeers()); err != nil && err != syncengine.ErrProvisioning {
-		// A missing peer is not a transfer. A provisioning refusal is the
-		// gate. Any other error is reported, but a successful sync is not.
-		if err.Error() != syncengine.ErrProvisioning.Error() {
-			t.Logf("direct syncengine sync: %v", err)
-		}
+	if _, err := source.Daemon.P2P.Sync.SyncGame(ctx, id, source.Daemon.P2P.OnlinePeers()); !errors.Is(err, syncengine.ErrProvisioning) {
+		t.Fatalf("held game must refuse direct sync, got %v", err)
 	}
 	var syncResp struct {
 		Error  string `json:"error"`
 		Reason string `json:"reason"`
 	}
 	status := source.APIStatus(http.MethodPost, "/api/games/"+id+"/sync", nil, &syncResp)
-	if status < 400 || syncResp.Reason != "provisioning" {
+	if status != http.StatusConflict || syncResp.Reason != "provisioning" {
 		t.Fatalf("direct sync of a held game returned %d %+v", status, syncResp)
 	}
-	if readHoldFile(bridgeDir, marker) != "" || readHoldFile(sourceDir, "from-bridge.sav") != "" {
-		t.Fatalf("held game transferred: bridge=%q source=%q", readHoldFile(bridgeDir, marker), readHoldFile(sourceDir, "from-bridge.sav"))
+	if readHoldFile(t, bridgeDir, marker) != "" || readHoldFile(t, sourceDir, "from-bridge.sav") != "" {
+		t.Fatalf("held game transferred: bridge=%q source=%q", readHoldFile(t, bridgeDir, marker), readHoldFile(t, sourceDir, "from-bridge.sav"))
 	}
 	if _, err := bridge.Daemon.Store.GetGame(id); err != nil {
 		t.Fatal("bridge lost the held game")
@@ -136,11 +138,11 @@ func TestProvisioningHold_PairedCreateRestartAndIsolation(t *testing.T) {
 	writeHoldFile(t, unrelatedSrc, "keep/fresh.sav", "UNRELATED-FRESH")
 	if !testutil.WaitFor(30*time.Second, func() bool {
 		source.API(http.MethodPost, "/api/games/"+store.SlugifyGameID("Hold Unrelated")+"/sync", nil, nil)
-		return readHoldFile(unrelatedBr, "keep/fresh.sav") == "UNRELATED-FRESH"
+		return readHoldFile(t, unrelatedBr, "keep/fresh.sav") == "UNRELATED-FRESH"
 	}) {
 		t.Fatal("unrelated game stopped syncing while another game was held")
 	}
-	if readHoldFile(newBr, "profile/source.sav") != "" {
+	if readHoldFile(t, newBr, "profile/source.sav") != "" {
 		t.Fatal("unrelated sync also copied the held game")
 	}
 
@@ -174,7 +176,7 @@ func TestProvisioningHold_PairedCreateRestartAndIsolation(t *testing.T) {
 	if status := bridge.APIStatus(http.MethodPost, "/api/p2p/delete-file/"+id, map[string]string{"relPath": "profile/bridge.sav"}, &deleted); status < 400 {
 		t.Fatalf("delete-file on a held game returned %d", status)
 	}
-	if readHoldFile(newBr, "profile/bridge.sav") != "ONLY-BRIDGE" {
+	if readHoldFile(t, newBr, "profile/bridge.sav") != "ONLY-BRIDGE" {
 		t.Fatal("inbound delete changed a held save")
 	}
 
@@ -196,19 +198,19 @@ func TestProvisioningHold_PairedCreateRestartAndIsolation(t *testing.T) {
 	defer cancel()
 	source.Daemon.P2P.PingPairedPeers(ctx)
 	source.Daemon.P2P.SyncAllGames(ctx)
-	if readHoldFile(newBr, "profile/source.sav") != "" || readHoldFile(newSrc, "profile/bridge.sav") != "" {
+	if readHoldFile(t, newBr, "profile/source.sav") != "" || readHoldFile(t, newSrc, "profile/bridge.sav") != "" {
 		t.Fatal("one-sided release transferred saves")
 	}
 
 	bridge.API(http.MethodPost, "/api/games/"+id+"/release-provisioning", nil, &rel)
 	if !testutil.WaitFor(45*time.Second, func() bool {
 		source.API(http.MethodPost, "/api/games/"+id+"/sync", nil, nil)
-		return readHoldFile(newBr, "profile/source.sav") == "ONLY-SOURCE" &&
+		return readHoldFile(t, newBr, "profile/source.sav") == "ONLY-SOURCE" &&
 			fileHash(newSrc, "profile/source.sav") == fileHash(newBr, "profile/source.sav")
 	}) {
-		t.Fatalf("release did not sync: bridge=%q", readHoldFile(newBr, "profile/source.sav"))
+		t.Fatalf("release did not sync: bridge=%q", readHoldFile(t, newBr, "profile/source.sav"))
 	}
-	if readHoldFile(unrelatedBr, "keep/fresh.sav") != "UNRELATED-FRESH" {
+	if readHoldFile(t, unrelatedBr, "keep/fresh.sav") != "UNRELATED-FRESH" {
 		t.Fatal("release disturbed the unrelated game")
 	}
 }
@@ -285,16 +287,16 @@ func TestProvisioningHold_PlaceOfferWithoutSyncing(t *testing.T) {
 		t.Fatalf("repeated place created %d games", n)
 	}
 	source.API(http.MethodPost, "/api/games/"+gameID+"/sync", nil, nil)
-	if readHoldFile(dest, "slot.sav") != "" {
+	if readHoldFile(t, dest, "slot.sav") != "" {
 		t.Fatal("placing with autoSync false synced the save")
 	}
 
 	bridge.API(http.MethodPost, "/api/games/"+gameID+"/release-provisioning", nil, nil)
 	if !testutil.WaitFor(45*time.Second, func() bool {
 		source.API(http.MethodPost, "/api/games/"+gameID+"/sync", nil, nil)
-		return readHoldFile(dest, "slot.sav") == "FROM-SOURCE"
+		return readHoldFile(t, dest, "slot.sav") == "FROM-SOURCE"
 	}) {
-		t.Fatalf("release did not deliver the save, dest=%q", readHoldFile(dest, "slot.sav"))
+		t.Fatalf("release did not deliver the save, dest=%q", readHoldFile(t, dest, "slot.sav"))
 	}
 }
 
@@ -373,16 +375,16 @@ func TestProvisioningHold_NamedRootsBeforeRelease(t *testing.T) {
 	if status := source.APIStatus(http.MethodPost, "/api/games/"+id+"/sync", nil, nil); status < 400 {
 		t.Fatalf("sync of a held game returned %d", status)
 	}
-	if readHoldFile(br, "main.sav") != "" || readHoldFile(brA, "a.sav") != "" || readHoldFile(brB, "b.sav") != "" {
+	if readHoldFile(t, br, "main.sav") != "" || readHoldFile(t, brA, "a.sav") != "" || readHoldFile(t, brB, "b.sav") != "" {
 		t.Fatal("named roots synced before release")
 	}
 	source.API(http.MethodPost, "/api/games/"+id+"/release-provisioning", nil, nil)
 	bridge.API(http.MethodPost, "/api/games/"+id+"/release-provisioning", nil, nil)
 	if !testutil.WaitFor(45*time.Second, func() bool {
 		source.API(http.MethodPost, "/api/games/"+id+"/sync", nil, nil)
-		return readHoldFile(br, "main.sav") == "MAIN" && readHoldFile(brA, "a.sav") == "ROOT-A" && readHoldFile(brB, "b.sav") == "ROOT-B"
+		return readHoldFile(t, br, "main.sav") == "MAIN" && readHoldFile(t, brA, "a.sav") == "ROOT-A" && readHoldFile(t, brB, "b.sav") == "ROOT-B"
 	}) {
-		t.Fatalf("roots after release: main=%q a=%q b=%q", readHoldFile(br, "main.sav"), readHoldFile(brA, "a.sav"), readHoldFile(brB, "b.sav"))
+		t.Fatalf("roots after release: main=%q a=%q b=%q", readHoldFile(t, br, "main.sav"), readHoldFile(t, brA, "a.sav"), readHoldFile(t, brB, "b.sav"))
 	}
 }
 
@@ -409,7 +411,7 @@ func TestProvisioningHold_HundredGamesStayOneDaemon(t *testing.T) {
 	writeHoldFile(t, liveSrc, "live.sav", "LIVE-UPDATED")
 	if !testutil.WaitFor(30*time.Second, func() bool {
 		source.API(http.MethodPost, "/api/games/"+store.SlugifyGameID("Bulk Live")+"/sync", nil, nil)
-		return readHoldFile(liveBr, "live.sav") == "LIVE-UPDATED"
+		return readHoldFile(t, liveBr, "live.sav") == "LIVE-UPDATED"
 	}) {
 		t.Fatal("the live game did not sync beside 100 held games")
 	}
@@ -449,7 +451,7 @@ func TestProvisioningHold_DoesNotConvertAnExistingGame(t *testing.T) {
 	if err != nil || held {
 		t.Fatalf("existing game held=%v err=%v", held, err)
 	}
-	if readHoldFile(node.SaveDir, "keep.sav") != "LIVE-BYTES" {
+	if readHoldFile(t, node.SaveDir, "keep.sav") != "LIVE-BYTES" {
 		t.Fatal("the failed hold changed save bytes")
 	}
 }
@@ -458,48 +460,49 @@ func TestProvisioningHold_DoesNotConvertAnExistingGame(t *testing.T) {
 // that should converge must not move the third while it is still held, and
 // release itself must not start that transfer.
 func TestProvisioningHold_StarLeavesHeldEndpointAlone(t *testing.T) {
-	bazzite := testutil.NewTestDaemon(t, "Star-Bazzite")
-	bridge := testutil.NewTestDaemon(t, "Star-Bridge")
-	deck := testutil.NewTestDaemon(t, "Star-Deck")
-	bazzite.PairWith(bridge)
-	deck.PairWith(bridge)
-	if _, err := bazzite.Daemon.Store.GetPeer(deck.NodeID()); err == nil {
-		t.Fatal("bazzite is paired with deck; the fixture is not a star")
+	leafA := testutil.NewTestDaemon(t, "Star-LeafA")
+	hub := testutil.NewTestDaemon(t, "Star-Hub")
+	leafB := testutil.NewTestDaemon(t, "Star-LeafB")
+	leafA.PairWith(hub)
+	leafB.PairWith(hub)
+	if _, err := leafA.Daemon.Store.GetPeer(leafB.NodeID()); err == nil {
+		t.Fatal("leafA is paired with leafB; the fixture is not a star")
 	}
 
 	const id = "star-game"
-	bz := sideDir(t, bazzite, "star")
-	br := sideDir(t, bridge, "star")
-	dk := sideDir(t, deck, "star")
-	writeHoldFile(t, bz, "progress.sav", "BAZZITE-ONLY")
-	writeHoldFile(t, dk, "progress.sav", "DECK-ONLY")
-	createHeld(t, bazzite, id, "Star Game", bz)
-	createHeld(t, bridge, id, "Star Game", br)
-	createHeld(t, deck, id, "Star Game", dk)
+	bz := sideDir(t, leafA, "star")
+	br := sideDir(t, hub, "star")
+	dk := sideDir(t, leafB, "star")
+	writeHoldFile(t, bz, "progress.sav", "LEAF-A-ONLY")
+	writeHoldFile(t, dk, "progress.sav", "LEAF-B-ONLY")
+	createHeld(t, leafA, id, "Star Game", bz)
+	createHeld(t, hub, id, "Star Game", br)
+	createHeld(t, leafB, id, "Star Game", dk)
 
 	var rel struct {
 		Released bool `json:"released"`
 	}
-	bazzite.API(http.MethodPost, "/api/games/"+id+"/release-provisioning", nil, &rel)
-	bridge.API(http.MethodPost, "/api/games/"+id+"/release-provisioning", nil, &rel)
-	// Release must not itself copy. The deck is still held.
-	if readHoldFile(br, "progress.sav") != "" || readHoldFile(dk, "progress.sav") != "DECK-ONLY" {
-		t.Fatal("release transferred before an explicit sync")
+	leafA.API(http.MethodPost, "/api/games/"+id+"/release-provisioning", nil, &rel)
+	hub.API(http.MethodPost, "/api/games/"+id+"/release-provisioning", nil, &rel)
+	// Default release enables AutoSync; the released pair may converge
+	// before this assertion. The held third peer must remain untouched.
+	if readHoldFile(t, dk, "progress.sav") != "LEAF-B-ONLY" {
+		t.Fatal("default release touched the held third peer")
 	}
 	if !testutil.WaitFor(45*time.Second, func() bool {
-		bazzite.API(http.MethodPost, "/api/games/"+id+"/sync", nil, nil)
-		return readHoldFile(br, "progress.sav") == "BAZZITE-ONLY" &&
-			readHoldFile(dk, "progress.sav") == "DECK-ONLY" &&
-			readHoldFile(bz, "progress.sav") == "BAZZITE-ONLY"
+		leafA.API(http.MethodPost, "/api/games/"+id+"/sync", nil, nil)
+		return readHoldFile(t, br, "progress.sav") == "LEAF-A-ONLY" &&
+			readHoldFile(t, dk, "progress.sav") == "LEAF-B-ONLY" &&
+			readHoldFile(t, bz, "progress.sav") == "LEAF-A-ONLY"
 	}) {
-		t.Fatalf("star sync moved a held endpoint or failed to converge the released pair: bridge=%q deck=%q bazzite=%q",
-			readHoldFile(br, "progress.sav"), readHoldFile(dk, "progress.sav"), readHoldFile(bz, "progress.sav"))
+		t.Fatalf("star sync moved a held endpoint or failed to converge the released pair: hub=%q leafB=%q leafA=%q",
+			readHoldFile(t, br, "progress.sav"), readHoldFile(t, dk, "progress.sav"), readHoldFile(t, bz, "progress.sav"))
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	bridge.Daemon.P2P.PingPairedPeers(ctx)
-	bridge.Daemon.P2P.SyncAllGames(ctx)
-	if readHoldFile(dk, "progress.sav") != "DECK-ONLY" || readHoldFile(bz, "progress.sav") != "BAZZITE-ONLY" {
+	hub.Daemon.P2P.PingPairedPeers(ctx)
+	hub.Daemon.P2P.SyncAllGames(ctx)
+	if readHoldFile(t, dk, "progress.sav") != "LEAF-B-ONLY" || readHoldFile(t, bz, "progress.sav") != "LEAF-A-ONLY" {
 		t.Fatal("reconcile on the middle peer moved a held endpoint or overwrote the released source")
 	}
 }
@@ -525,7 +528,7 @@ func TestProvisioningHold_DefaultReleaseLetsReconcileSync(t *testing.T) {
 	source.Daemon.P2P.PingPairedPeers(ctx)
 	source.Daemon.P2P.SyncAllGames(ctx)
 	if !testutil.WaitFor(20*time.Second, func() bool {
-		return readHoldFile(br, "slot.sav") == "RECONCILE-BYTES"
+		return readHoldFile(t, br, "slot.sav") == "RECONCILE-BYTES"
 	}) {
 		t.Fatal("default release plus reconcile did not sync; the witness is wrong or the path changed")
 	}
@@ -536,65 +539,105 @@ func TestProvisioningHold_DefaultReleaseLetsReconcileSync(t *testing.T) {
 // a peer that is still held must refuse. Both ends of the star are tried as
 // the writer.
 func TestProvisioningHold_StagedReleaseSkipsReconcile(t *testing.T) {
-	for _, writer := range []string{"bazzite", "deck"} {
+	for _, writer := range []string{"leafA", "leafB"} {
 		t.Run(writer, func(t *testing.T) {
-			bazzite := testutil.NewTestDaemon(t, "Staged-Bazzite")
-			bridge := testutil.NewTestDaemon(t, "Staged-Bridge")
-			deck := testutil.NewTestDaemon(t, "Staged-Deck")
-			bazzite.PairWith(bridge)
-			deck.PairWith(bridge)
+			leafA := testutil.NewTestDaemon(t, "Staged-LeafA")
+			hub := testutil.NewTestDaemon(t, "Staged-Hub")
+			leafB := testutil.NewTestDaemon(t, "Staged-LeafB")
+			leafA.PairWith(hub)
+			leafB.PairWith(hub)
 			const id = "staged-game"
-			bz := sideDir(t, bazzite, "staged")
-			br := sideDir(t, bridge, "staged")
-			dk := sideDir(t, deck, "staged")
-			writeHoldFile(t, bz, "progress.sav", "BAZZITE-ONLY")
-			writeHoldFile(t, dk, "progress.sav", "DECK-ONLY")
-			createHeld(t, bazzite, id, "Staged Game", bz)
-			createHeld(t, bridge, id, "Staged Game", br)
-			createHeld(t, deck, id, "Staged Game", dk)
+			bz := sideDir(t, leafA, "staged")
+			br := sideDir(t, hub, "staged")
+			dk := sideDir(t, leafB, "staged")
+			writeHoldFile(t, bz, "progress.sav", "LEAF-A-ONLY")
+			writeHoldFile(t, dk, "progress.sav", "LEAF-B-ONLY")
+			createHeld(t, leafA, id, "Staged Game", bz)
+			createHeld(t, hub, id, "Staged Game", br)
+			createHeld(t, leafB, id, "Staged Game", dk)
 
-			progressed := bazzite
-			progressedDir, quietDir, quietBytes := bz, dk, "DECK-ONLY"
-			if writer == "deck" {
-				progressed = deck
-				progressedDir, quietDir, quietBytes = dk, bz, "BAZZITE-ONLY"
+			progressed := leafA
+			progressedDir, quietDir, quietBytes := bz, dk, "LEAF-B-ONLY"
+			if writer == "leafB" {
+				progressed = leafB
+				progressedDir, quietDir, quietBytes = dk, bz, "LEAF-A-ONLY"
 			}
 			var rel struct {
 				Released bool `json:"released"`
 				AutoSync bool `json:"autoSync"`
 			}
 			progressed.API(http.MethodPost, "/api/games/"+id+"/release-provisioning", map[string]any{"autoSync": false}, &rel)
-			bridge.API(http.MethodPost, "/api/games/"+id+"/release-provisioning", map[string]any{"autoSync": false}, &rel)
+			hub.API(http.MethodPost, "/api/games/"+id+"/release-provisioning", map[string]any{"autoSync": false}, &rel)
 			if rel.AutoSync {
 				t.Fatal("staged release turned AutoSync on")
 			}
 			writeHoldFile(t, progressedDir, "later.sav", "AFTER-RELEASE")
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 			defer cancel()
-			for _, node := range []*testutil.TestDaemon{bazzite, bridge, deck} {
+			for _, node := range []*testutil.TestDaemon{leafA, hub, leafB} {
 				node.Daemon.P2P.PingPairedPeers(ctx)
 				node.Daemon.P2P.SyncAllGames(ctx)
 			}
-			if readHoldFile(br, "progress.sav") != "" || readHoldFile(quietDir, "progress.sav") != quietBytes {
-				t.Fatalf("staged reconcile moved bytes: bridge=%q quiet=%q", readHoldFile(br, "progress.sav"), readHoldFile(quietDir, "progress.sav"))
+			if readHoldFile(t, br, "progress.sav") != "" || readHoldFile(t, quietDir, "progress.sav") != quietBytes {
+				t.Fatalf("staged reconcile moved bytes: hub=%q quiet=%q", readHoldFile(t, br, "progress.sav"), readHoldFile(t, quietDir, "progress.sav"))
 			}
 			progressed.Restart()
-			bridge.Restart()
+			hub.Restart()
 			progressed.Daemon.P2P.PingPairedPeers(ctx)
 			progressed.Daemon.P2P.SyncAllGames(ctx)
-			if readHoldFile(br, "progress.sav") != "" {
+			if readHoldFile(t, br, "progress.sav") != "" {
 				t.Fatal("restart after staged release let reconcile copy the save")
 			}
 			if !testutil.WaitFor(45*time.Second, func() bool {
 				progressed.API(http.MethodPost, "/api/games/"+id+"/sync", nil, nil)
-				return readHoldFile(br, "progress.sav") == map[string]string{"bazzite": "BAZZITE-ONLY", "deck": "DECK-ONLY"}[writer]
+				return readHoldFile(t, br, "progress.sav") == map[string]string{"leafA": "LEAF-A-ONLY", "leafB": "LEAF-B-ONLY"}[writer]
 			}) {
-				t.Fatalf("explicit sync after staged release did not converge the released pair: bridge=%q", readHoldFile(br, "progress.sav"))
+				t.Fatalf("explicit sync after staged release did not converge the released pair: hub=%q", readHoldFile(t, br, "progress.sav"))
 			}
-			if readHoldFile(quietDir, "progress.sav") != quietBytes || readHoldFile(quietDir, "later.sav") != "" {
+			if readHoldFile(t, br, "later.sav") != "AFTER-RELEASE" {
+				t.Fatal("explicit sync omitted later save progress")
+			}
+			for _, rel := range []string{"progress.sav", "later.sav"} {
+				want, got := fileHash(progressedDir, rel), fileHash(br, rel)
+				if want == "" || want != got {
+					t.Fatalf("sync hash differs for %q: source=%q hub=%q", rel, want, got)
+				}
+			}
+			if readHoldFile(t, quietDir, "progress.sav") != quietBytes || readHoldFile(t, quietDir, "later.sav") != "" {
 				t.Fatal("explicit sync moved the peer that is still held")
 			}
 		})
+	}
+}
+
+// A staged release blocks local auto-sync attempts but NOT an unheld
+// peer's incoming request. This endpoint is not peer-specific authorization.
+func TestProvisioningHold_StagedReleaseAllowsPeerInitiatedSync(t *testing.T) {
+	source := testutil.NewTestDaemon(t, "SyncRequester")
+	receiver := testutil.NewTestDaemon(t, "StagedReceiver")
+	source.WriteSave("slot.sav", "PEER-INITIATED")
+	gameID := source.TrackGame("Peer Initiated Staged Game")
+	recvDir := sideDir(t, receiver, "incoming")
+	createHeld(t, receiver, gameID, "Peer Initiated Staged Game", recvDir)
+	source.PairWith(receiver)
+	var state struct {
+		Released bool `json:"released"`
+		AutoSync bool `json:"autoSync"`
+	}
+	receiver.API(http.MethodPost, "/api/games/"+gameID+"/release-provisioning",
+		map[string]any{"autoSync": false}, &state)
+	if !state.Released || state.AutoSync {
+		t.Fatalf("staged release state = %+v", state)
+	}
+	if !testutil.WaitFor(45*time.Second, func() bool {
+		source.API(http.MethodPost, "/api/games/"+gameID+"/sync", nil, nil)
+		return readHoldFile(t, recvDir, "slot.sav") == "PEER-INITIATED"
+	}) {
+		t.Fatal("released receiver did not accept peer-initiated sync")
+	}
+	game, err := receiver.Daemon.Store.GetGame(gameID)
+	if err != nil || game.AutoSync {
+		t.Fatalf("peer request changed local AutoSync: %+v, %v", game, err)
 	}
 }
 
@@ -628,8 +671,37 @@ func TestProvisioningHold_PatchDoesNotUnhold(t *testing.T) {
 	defer cancel()
 	source.Daemon.P2P.PingPairedPeers(ctx)
 	source.Daemon.P2P.SyncAllGames(ctx)
-	if readHoldFile(br, "slot.sav") != "" {
+	if readHoldFile(t, br, "slot.sav") != "" {
 		t.Fatal("PATCH autoSync true let reconcile copy a held save")
+	}
+}
+
+// Path updates to a still-held game must reject symlink roots, as
+// initial held creation and named-root admission already do.
+func TestProvisioningHold_HeldPathUpdateRejectsSymlink(t *testing.T) {
+	node := testutil.NewTestDaemon(t, "HeldPathUpdate")
+	original := sideDir(t, node, "primary")
+	createHeld(t, node, "held-path-update", "Held Path Update", original)
+	target := sideDir(t, node, "target")
+	link := filepath.Join(filepath.Dir(node.SaveDir), "held-path-link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+	var resp struct {
+		Error string `json:"error"`
+	}
+	status := node.APIStatus(http.MethodPatch, "/api/games/held-path-update",
+		map[string]any{"savePath": link}, &resp)
+	if status < 400 || status >= 500 {
+		t.Fatalf("held game accepted symlink update: HTTP %d %+v", status, resp)
+	}
+	game, err := node.Daemon.Store.GetGame("held-path-update")
+	if err != nil || game.SavePath != original || game.AutoSync {
+		t.Fatalf("rejected path update changed game: %+v, %v", game, err)
+	}
+	held, err := node.Daemon.Store.ProvisioningHeld(game.ID)
+	if err != nil || !held {
+		t.Fatalf("rejected path update removed hold: %v, %v", held, err)
 	}
 }
 

@@ -16,7 +16,8 @@ import (
 // still held. {"autoSync": false} clears the hold and leaves AutoSync off, so
 // those paths do not sync. The caller syncs explicitly, then turns AutoSync
 // on when that result is the one it wants kept. A repeat after the hold is
-// gone does not change AutoSync.
+// gone does not change AutoSync. Staged release blocks this device
+// from initiating automatic sync, not unheld peers from requesting files.
 func (s *Server) handleReleaseProvisioning(w http.ResponseWriter, r *http.Request) {
 	gameID := chi.URLParam(r, "gameId")
 	var body struct {

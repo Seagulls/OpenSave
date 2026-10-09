@@ -150,7 +150,13 @@ func releaseProvisioning(d *daemon.Daemon, args []string, asJSON bool) int {
 		return fail(asJSON, err)
 	}
 	if asJSON {
-		return emitJSON(map[string]any{"id": gameID, "released": released, "alreadyReleased": !released, "autoSync": !noAuto})
+		// An idempotent repeat changes nothing. Return stored AutoSync,
+		// not the mode requested by this invocation.
+		game, err := d.Store.GetGame(gameID)
+		if err != nil {
+			return fail(asJSON, err)
+		}
+		return emitJSON(map[string]any{"id": gameID, "released": released, "alreadyReleased": !released, "autoSync": game.AutoSync})
 	}
 	if released && noAuto {
 		success("Released %s without auto-sync. Sync it explicitly, then turn auto-sync on.", bold(gameID))
