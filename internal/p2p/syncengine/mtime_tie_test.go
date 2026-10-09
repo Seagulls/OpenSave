@@ -91,9 +91,8 @@ func TestAnMtimeTieWithAnUnrelatedBaseStillPulls(t *testing.T) {
 
 // An agreed common version beats the filesystem clock. This used to expect
 // the newer mtime to win even when that side was exactly the agreed base.
-// That overwrote the only real edit. The name records the old expectation;
-// the outcome is the correction.
-func TestANewerSideStillWinsRegardlessOfTheBase(t *testing.T) {
+// That overwrote the only real edit. The corrected precedence is explicit.
+func TestAgreedBaseOverridesNewerMtime(t *testing.T) {
 	const reference = delta.Milli(1_700_000_000_000)
 	lineage := map[string]struct{}{"save.dat": {}}
 

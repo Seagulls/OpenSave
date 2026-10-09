@@ -83,9 +83,6 @@ func TestBaseFirstBothChangedStillConflict(t *testing.T) {
 	}
 }
 
-// A base that matches neither side is not evidence. Mtime remains the only
-// ordering this function will use, and that can still be wrong. This pins the
-// limit rather than inventing a winner.
 // A deliberate local deletion of a file that is still in the lineage must
 // propagate, not be undone because the peer's copy of the agreed base has a
 // later mtime. The base-first file rule does not apply: the file is absent
@@ -107,6 +104,25 @@ func TestBaseFirstDoesNotResurrectADeletedFile(t *testing.T) {
 	}
 }
 
+// A peer's tracked deletion must not be undone by pushing the
+// unchanged local copy of the agreed file, even with a later timestamp.
+func TestBaseFirstDoesNotResurrectPeerDeletedFile(t *testing.T) {
+	base := delta.Manifest{Files: map[string]delta.FileEntry{
+		"slot.sav": {Hash: "old", MtimeMs: 1000},
+	}}
+	local := delta.Manifest{Files: map[string]delta.FileEntry{
+		"slot.sav": {Hash: "old", MtimeMs: 9000},
+	}}
+	remote := delta.Manifest{Files: map[string]delta.FileEntry{}}
+	d := ComputeWithBase(local, remote,
+		map[string]struct{}{"slot.sav": {}}, nil, base.ManifestHash())
+	if len(d.FilesToPush) != 0 || len(d.FilesToDeleteLocally) != 1 ||
+		d.FilesToDeleteLocally[0] != "slot.sav" {
+		t.Fatalf("remote deletion was undone or ignored: %+v", d)
+	}
+}
+
+// With no matching agreed state, legacy mtime behaviour remains a limit.
 func TestStaleAgreedBaseDoesNotOverrideMtime(t *testing.T) {
 	local := tieManifest("LOCAL", 2000)
 	remote := tieManifest("REMOTE", 1000)
