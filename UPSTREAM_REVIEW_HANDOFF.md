@@ -15,12 +15,84 @@ was not downloaded. Linux only. No Windows or macOS run.
 
 | Branch | Base | Tip | Pushed |
 | --- | --- | --- | --- |
-| `feat/atomic-safe-game-provisioning` | `346d9bda0749fb57b48fd266f13e535af80f0285` | `af05e652f050404f8dcdb99f93a2e49ab9bb9891` | `Seagulls/OpenSave` only |
-| `fix/agreed-base-precedes-mtime` | same base | `8d893ff8bd12acf7f53de3f84783d7fe9849dbff` | `Seagulls/OpenSave` only |
+| `feat/atomic-safe-game-provisioning` | `346d9bda0749fb57b48fd266f13e535af80f0285` | `eb60926b03ee1450358034a3efc2ff84ddfdb842` | `Seagulls/OpenSave` only |
+| `fix/agreed-base-precedes-mtime` | same base | `aee1c1add543a80e5f400fcde2f4e466659c0ac6` | `Seagulls/OpenSave` only |
 | `review/upstream-handoff` | docs only | this commit | docs only |
 
-Previous reviewed tips were `1508845` and `feedc3b`. Both are ancestors of the
-tips above. Ancestry from `346d9bda` was checked before editing.
+Previous reviewed tips `af05e65` and `8d893ff` are parents of the tips above.
+`1508845` and `feedc3b` remain ancestors. No force-push.
+
+## 1b. Final hardening tranche
+
+Commit `eb60926` on the provisioning branch, message
+`test: make provisioning safety contracts clear and upstream-neutral`.
+Files:
+
+- `e2e/provisioning_hold_test.go`
+- `internal/api/routes.go`
+- `internal/api/routes_provisioning.go`
+- `internal/cliapp/commands_games.go`
+
+What changed and why:
+
+- Upstream tests no longer use Bazzite, Deck, or SaveSync names. The star is
+  `leafA` / `hub` / `leafB`.
+- A direct held sync that returns anything other than `ErrProvisioning` fails
+  the test. The HTTP refusal must be 409 with reason `provisioning`.
+- Fixture reads fail on I/O errors instead of treating every error as a
+  missing file.
+- Staged sync compares SHA-256 of `progress.sav` and `later.sav`. The held
+  third peer must keep its original bytes.
+- Default-release assertions no longer assume reconcile has not started.
+  They only require the still-held peer to be untouched.
+- `TestProvisioningHold_StagedReleaseAllowsPeerInitiatedSync` shows staged
+  release does not stop an unheld peer from pulling. It is not peer
+  authorization.
+- A held primary path cannot be changed to a symlink. The old path, hold,
+  AutoSync-off state, and files stay.
+- Offline CLI JSON reports the stored AutoSync value after an idempotent
+  release, not the flag from the command.
+
+Commit `aee1c1a` on the mtime branch, message
+`test: clarify agreed-base regressions and symmetric deletion`.
+Files:
+
+- `internal/p2p/syncengine/base_first_rollback_test.go`
+- `internal/p2p/syncengine/mtime_tie_test.go`
+
+No production sync change. `TestANewerSideStillWinsRegardlessOfTheBase` was
+renamed to `TestAgreedBaseOverridesNewerMtime` because the old name described
+the opposite result. A remote deletion of an agreed file is not pushed back.
+
+Deliberately not done: version vectors, peer-targeted sync, a downgrade
+migration, SaveSync-specific APIs, session-code changes.
+
+Stock session failure, confirmed independently on `346d9bda` with
+`go test -count=8 -timeout 8m ./internal/daemon` against a `git archive` of
+that commit. Signature: `TestSessionNamesTheSnapshotAlreadyTaken` and
+`want the watcher`. Evidence:
+`/home/guy/Documents/ai/Savesync-logs/opensave-stock-session-baseline-20261009-113606Z.log`.
+The provisioning package gate used
+`-skip '^TestSessionNamesTheSnapshotAlreadyTaken$'` only. That is not a green
+unmodified suite. The mtime package gate did not include `./internal/daemon`
+for that reason. E2E was not skipped.
+
+Validation on `go1.27.1-X:nodwarf5` (`go.mod` asks for 1.26.4; that toolchain
+was not downloaded). Publish rerun RC=0 for both branches, including
+`./e2e/...` (provisioning 758s, mtime 764s) and the race filters. New tests
+also passed `-count=3`. `go vet` and `git diff --check` passed. `gofmt -l`
+was empty on the changed files.
+
+`go test ./...` remains blocked by `cmd/opensave-app` embedding
+`frontend/dist`, which is not in the clone. Not stubbed.
+
+Combined local tree `d870af1` (not pushed) ran `TestSaveSyncStar*` RC=0.
+Log: `/home/guy/Documents/ai/Savesync-logs/savesync-grok-opensave-three-node.log`.
+Offline round trip PASS. Dual-writer both orders PASS with status conflict
+and unique files kept. Idle-bridge mtime rollback PASS.
+
+No live device, real save, or SaveSync source was touched. No upstream PR
+was opened.
 
 Compare:
 
@@ -253,7 +325,7 @@ and a named root.
 | --- | --- |
 | (a) Issue #41 PR review | **GO** for review. Not a hardware explanation. Pre-existing `TestSessionNamesTheSnapshotAlreadyTaken` fails on this tip and on stock; it is not part of this diff. |
 | (b) Issue #40 PR review | **GO** for review of the hold and staged release. **NO-GO** as unattended SaveSync/Bridge enablement. Default release lets reconcile sync. Explicit sync is not peer-targeted. The Bridge id is not created automatically. |
-| (c) Combined isolated testing | **GO**. Local `d7ef7c6` passed the focused set and `TestSaveSyncStar*`. Not a PR. |
+| (c) Combined isolated testing | **GO**. Local `d870af1` (parents `eb60926` and `aee1c1a`) passed `TestSaveSyncStar*`. Not a PR. |
 | (d) Live hardware | **NO-GO**. |
 
 ## 9. What to inspect next
@@ -261,8 +333,9 @@ and a named root.
 1. `ReleaseProvisioningMode` and the empty-body default. Confirm the project lead accepts that default release is not staged.
 2. `handleUpdateGame` restoring `autoSync` while held. Confirm a dashboard round-trip cannot release.
 3. The mixed-version log. Stock-to-patched did not move bytes. Stock serving a patched DB did.
-4. `decision.go` base-before-mtime, and that `TestANewerSideStillWinsRegardlessOfTheBase` was rewritten rather than deleted.
-5. Do not treat #29/#30 as done.
+4. `decision.go` base-before-mtime. The old test name is now `TestAgreedBaseOverridesNewerMtime`. It was renamed, not deleted.
+5. Staged release is local AutoSync off, not a peer lock. `TestProvisioningHold_StagedReleaseAllowsPeerInitiatedSync` is the contract.
+6. Do not treat #29/#30 as done.
 
 SaveSync integration, contract only, no code in this tranche:
 
