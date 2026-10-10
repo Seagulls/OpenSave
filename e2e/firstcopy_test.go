@@ -239,3 +239,68 @@ func TestFirstCopy_OnlyNamedTargetReceivesAndSourceIsNotWritten(t *testing.T) {
 		t.Fatal("third peer exchanged files after delayed abort/finish and restart")
 	}
 }
+
+func TestFirstCopy_ActivatedPeerGameOpsCannotRemoveFence(t *testing.T) {
+	source := testutil.NewTestDaemon(t, "GameOp-Source")
+	target := testutil.NewTestDaemon(t, "GameOp-Target")
+	other := testutil.NewTestDaemon(t, "GameOp-Other")
+	source.PairWith(target)
+	source.PairWith(other)
+	const id = "game-op-fence"
+	src := sideDir(t, source, "game-op")
+	tgt := sideDir(t, target, "game-op")
+	third := sideDir(t, other, "game-op")
+	writeHoldFile(t, src, "slot.sav", "AUTHORITATIVE")
+	writeHoldFile(t, third, "other.sav", "THIRD")
+	createHeld(t, source, id, "Game Op Fence", src)
+	createHeld(t, target, id, "Game Op Fence", tgt)
+	createHeld(t, other, id, "Game Op Fence", third)
+	if err := source.Daemon.Store.AddGameAlias("old-alias", id); err != nil {
+		t.Fatal(err)
+	}
+	lease := beginCopy(t, source, id, "source", target.NodeID())
+	source.API(http.MethodPost, "/api/games/"+id+"/first-copy/finish", map[string]string{"txId": lease.TxID}, nil)
+	source.API(http.MethodPost, "/api/games/"+id+"/first-copy/activate", map[string]string{"txId": lease.TxID}, nil)
+
+	// Exercise the same daemon callbacks used by authenticated LAN and WAN
+	// untrack/retrack notifications, without relying on asynchronous timing.
+	if source.Daemon.P2P.OnUntrackRequest == nil || source.Daemon.P2P.OnRetrackRequest == nil {
+		t.Fatal("peer game-op callbacks missing")
+	}
+	source.Daemon.P2P.OnUntrackRequest(id)
+	source.Daemon.P2P.OnRetrackRequest(id)
+	if _, err := source.Daemon.Store.GetGame(id); err != nil {
+		t.Fatalf("peer game op removed authoritative game: %v", err)
+	}
+	if err := source.Daemon.UntrackGame(id); err == nil {
+		t.Fatal("local untrack removed activated game")
+	}
+	if err := source.Daemon.LinkGames(id, "new-alias"); err == nil {
+		t.Fatal("game link changed activated identity")
+	}
+	if _, ok := source.Daemon.Store.GetGameAlias("new-alias"); ok {
+		t.Fatal("refused link still installed alias")
+	}
+	if err := source.Daemon.UnlinkGame("old-alias"); err == nil {
+		t.Fatal("unlink changed activated identity")
+	}
+	if _, ok := source.Daemon.Store.GetGameAlias("old-alias"); !ok {
+		t.Fatal("refused unlink removed alias")
+	}
+
+	if status := source.APIStatus(http.MethodPatch, "/api/games/"+id, map[string]any{"autoSync": true}, nil); status < 400 {
+		t.Fatalf("settings API enabled AutoSync while fenced: %d", status)
+	}
+	fence, err := source.Daemon.Store.BoundFirstCopy(id)
+	if err != nil || fence == nil || fence.Phase != store.FirstCopyActivated || fence.PeerID != target.NodeID() {
+		t.Fatalf("game lifecycle removed fence: %+v %v", fence, err)
+	}
+	if readHoldFile(t, src, "slot.sav") != "AUTHORITATIVE" {
+		t.Fatal("game lifecycle modified source data")
+	}
+	other.API(http.MethodPost, "/api/games/"+id+"/release-provisioning", map[string]any{"autoSync": false}, nil)
+	other.APIStatus(http.MethodPost, "/api/games/"+id+"/sync", nil, nil)
+	if readHoldFile(t, third, "slot.sav") != "" || readHoldFile(t, src, "other.sav") != "" {
+		t.Fatal("third peer exchanged first-copy data")
+	}
+}

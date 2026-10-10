@@ -14,6 +14,9 @@ func newFirstCopyLifecycleStore(t *testing.T, gameID string) (*Store, FirstCopy)
 	if err := s.CreateHeldGame(Game{ID: gameID, Name: "Lifecycle", SavePath: t.TempDir(), MaxSnapshots: 5}); err != nil {
 		t.Fatal(err)
 	}
+	if err := s.AddGameAlias("firstcopy-alias", gameID); err != nil {
+		t.Fatal(err)
+	}
 	row, err := s.BeginFirstCopy(gameID, FirstCopySource, "firstcopy-source-peer", "hash-a", time.Hour)
 	if err != nil {
 		t.Fatal(err)
@@ -113,5 +116,61 @@ func TestFirstCopyVerifiedDigestCannotChangeOnRepeat(t *testing.T) {
 	lease, err := s.ActiveFirstCopy(id)
 	if err != nil || lease == nil || lease.Phase != FirstCopyVerified || lease.ContentHash != "hash-a" {
 		t.Fatalf("verified digest mutated: %+v %v", lease, err)
+	}
+}
+
+func TestFirstCopyGameDeletePreservesFenceUntilExplicitOpen(t *testing.T) {
+	const id = "lifecycle-delete"
+	s, row := newFirstCopyLifecycleStore(t, id)
+	if err := s.DeleteGame(id); err == nil {
+		t.Fatal("verified first-copy game was deleted")
+	}
+	if _, err := s.ActivateFirstCopy(id, row.TxID, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteGame(id); err == nil {
+		t.Fatal("activated game was deleted and fence cascaded")
+	}
+	fence, err := s.BoundFirstCopy(id)
+	if err != nil || fence == nil || fence.Phase != FirstCopyActivated {
+		t.Fatalf("fence lost: %+v %v", fence, err)
+	}
+	if err := s.AddGameAlias("new-alias", id); err == nil {
+		t.Fatal("direct App-ID-style alias bypassed activated fence")
+	}
+	if err := s.RemoveGameAlias("firstcopy-alias"); err == nil {
+		t.Fatal("direct alias removal bypassed activated fence")
+	}
+	if blocked, err := s.FirstCopyBlocksGameChange("firstcopy-alias"); err != nil || !blocked {
+		t.Fatalf("an alias bypassed the fence: blocked=%t err=%v", blocked, err)
+	}
+	if err := s.AddGameRoot(id, "added-after-activation", t.TempDir()); err == nil {
+		t.Fatal("root addition changed activated save set")
+	}
+	if err := s.NoteGameRoot(id, "discovered-after-activation"); err == nil {
+		t.Fatal("root discovery changed activated save set")
+	}
+	if err := s.RemoveGameRoot(id, "firstcopy-root"); err == nil {
+		t.Fatal("root removal changed activated save set")
+	}
+	if err := s.OpenFirstCopy(id, row.TxID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteGame(id); err != nil {
+		t.Fatalf("ordinary DeleteGame after open changed: %v", err)
+	}
+}
+
+func TestFirstCopyGameDeleteAfterAbortRetainsOrdinaryBehavior(t *testing.T) {
+	const id = "lifecycle-abort-delete"
+	s, row := newFirstCopyLifecycleStore(t, id)
+	if err := s.AbortFirstCopy(id, row.TxID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteGame(id); err != nil {
+		t.Fatalf("DeleteGame after explicit abort failed: %v", err)
+	}
+	if err := s.DeleteGame(id); err != ErrNotFound {
+		t.Fatalf("missing game changed ErrNotFound semantics: %v", err)
 	}
 }

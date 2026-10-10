@@ -64,6 +64,19 @@ pre-existing divergent files is refused before first-copy writes. An
 expired nonactivated lease is never a permission and cannot be stolen by a
 different peer. No ordinary game is affected when first copy was not opted in.
 
+Game operations are restricted while a first-copy row exists, including the
+activated phase after the native provisioning hold is released: untrack,
+peer-originated untrack/retrack and relink/unlink are refused before metadata
+mutation. The store's DeleteGame additionally has an atomic SQL fence against
+ON DELETE CASCADE removing the first-copy row. App-ID auto-matching calls
+AddGameAlias directly, so AddGameAlias and RemoveGameAlias also use atomic
+SQLite guards (including bounded alias chains). These restrictions are scoped
+only to explicitly opted-in games; normal unfenced game lifecycle is unchanged.
+An activated game also refuses settings edits that turn on AutoSync, switch
+branches or change the tracked save layout; store-level add/note/remove root
+operations refuse the activated state. Provisioning root configuration before
+activation and cosmetic metadata edits remain allowed.
+
 ## Not in this change
 
 No second sync engine, no peer-targeted ordinary sync, no version vectors,

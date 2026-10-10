@@ -92,6 +92,37 @@ func (s *Store) BoundFirstCopy(gameID string) (*FirstCopy, error) {
 	return nil, nil
 }
 
+// FirstCopyBlocksGameChange reports a durable first-copy record for this game
+// or an alias of it. Unlike ActiveFirstCopy this includes expired and activated
+// rows: an expired transfer is NOT permission to delete the last fence.
+// The bounded alias walk mirrors the existing game ID resolution limit.
+func (s *Store) FirstCopyBlocksGameChange(gameID string) (bool, error) {
+	if s == nil {
+		return false, fmt.Errorf("first-copy state is unavailable")
+	}
+	if gameID == "" {
+		return false, nil
+	}
+	if err := s.provisioningFault(); err != nil {
+		return false, err
+	}
+	var count int
+	err := s.db.Get(&count, `
+        WITH RECURSIVE ids(id, depth) AS (
+            SELECT ?, 0
+            UNION ALL
+            SELECT aliases.game_id, ids.depth + 1
+            FROM game_aliases AS aliases JOIN ids ON aliases.alias_id = ids.id
+            WHERE ids.depth < 8
+        )
+        SELECT COUNT(*) FROM game_first_copies
+        WHERE game_id IN (SELECT id FROM ids)`, gameID)
+	if err != nil {
+		return false, fmt.Errorf("first-copy game-change fence %s: %w", gameID, err)
+	}
+	return count > 0, nil
+}
+
 // BeginFirstCopy records a lease for a game that is still held. The hold
 // check and the insert are one transaction. The same role and peer returns
 // the existing transaction, or replaces an expired row with a new one. A

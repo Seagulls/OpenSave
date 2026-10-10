@@ -45,12 +45,29 @@ func (s *Store) AddGameAlias(aliasID, gameID string) error {
 	if aliasID == "" || gameID == "" || aliasID == gameID {
 		return fmt.Errorf("invalid game alias %q -> %q", aliasID, gameID)
 	}
-	_, err := s.db.Exec(
-		`INSERT INTO game_aliases (alias_id, game_id, created_at_ms) VALUES (?, ?, ?)
-		 ON CONFLICT(alias_id) DO UPDATE SET game_id = excluded.game_id`,
-		aliasID, gameID, time.Now().UnixMilli())
+	// This is also called automatically on a peer manifest (App-ID match),
+	// so protecting only the daemon's manual LinkGames API is insufficient.
+	// Both the new target and an existing alias chain are checked atomically.
+	res, err := s.db.Exec(`
+        WITH RECURSIVE bound(id, depth) AS (
+            SELECT ?, 0 UNION ALL SELECT ?, 0
+            UNION ALL SELECT a.game_id, bound.depth + 1 FROM game_aliases a
+            JOIN bound ON a.alias_id = bound.id WHERE bound.depth < 8
+        )
+        INSERT INTO game_aliases (alias_id, game_id, created_at_ms)
+        SELECT ?, ?, ? WHERE NOT EXISTS
+            (SELECT 1 FROM game_first_copies WHERE game_id IN (SELECT id FROM bound))
+        ON CONFLICT(alias_id) DO UPDATE SET game_id = excluded.game_id`,
+		aliasID, gameID, aliasID, gameID, time.Now().UnixMilli())
 	if err != nil {
 		return fmt.Errorf("add game alias %s: %w", aliasID, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n != 1 {
+		return fmt.Errorf("cannot link %s to %s: first-copy transaction or activated fence exists", aliasID, gameID)
 	}
 	return nil
 }
@@ -180,10 +197,33 @@ func (s *Store) ListGameAliases(gameID string) ([]string, error) {
 
 // RemoveGameAlias drops a single link.
 func (s *Store) RemoveGameAlias(aliasID string) error {
-	if _, err := s.db.Exec(`DELETE FROM game_aliases WHERE alias_id = ?`, aliasID); err != nil {
+	// An alias cannot be deleted while it (possibly transitively) routes to
+	// a fenced game. Otherwise a peer event could silently change authority.
+	res, err := s.db.Exec(`
+        WITH RECURSIVE bound(id, depth) AS (
+            SELECT ?, 0
+            UNION ALL SELECT a.game_id, bound.depth + 1 FROM game_aliases a
+            JOIN bound ON a.alias_id = bound.id WHERE bound.depth < 8
+        )
+        DELETE FROM game_aliases WHERE alias_id = ? AND NOT EXISTS
+            (SELECT 1 FROM game_first_copies WHERE game_id IN (SELECT id FROM bound))`, aliasID, aliasID)
+	if err != nil {
 		return fmt.Errorf("remove game alias %s: %w", aliasID, err)
 	}
-	return nil
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		blocked, err := s.FirstCopyBlocksGameChange(aliasID)
+		if err != nil {
+			return err
+		}
+		if blocked {
+			return fmt.Errorf("cannot unlink %s: first-copy transaction or activated fence exists", aliasID)
+		}
+	}
+	return nil // preserve the former no-op for an absent unfenced alias
 }
 
 // maxAliasHops bounds the walk from an alias to its canonical game.

@@ -1352,10 +1352,27 @@ func snapIDToTimestamp(snapID string) string {
 	return time.UnixMilli(ms).UTC().Format("2006-01-02T15:04:05.000Z")
 }
 
+// refuseFirstCopyGameChange keeps peer notifications and user lifecycle
+// actions from removing/redirecting a game while its first-copy authority
+// is staged or activated. Ordinary unfenced games are unchanged.
+func (d *Daemon) refuseFirstCopyGameChange(gameID, operation string) error {
+	blocked, err := d.Store.FirstCopyBlocksGameChange(gameID)
+	if err != nil {
+		return fmt.Errorf("cannot %s %q: first-copy state unreadable: %w", operation, gameID, err)
+	}
+	if blocked {
+		return fmt.Errorf("cannot %s %q: first-copy transaction or activated fence exists; abort before activation or explicitly open after verification", operation, gameID)
+	}
+	return nil
+}
+
 // UntrackGame stops watching and removes a game. Snapshot zip files on
 // disk are intentionally kept (they're the user's backups); only metadata
 // is removed — same as the JS app.
 func (d *Daemon) UntrackGame(gameID string) error {
+	if err := d.refuseFirstCopyGameChange(gameID, "untrack"); err != nil {
+		return err
+	}
 	d.Watcher.Unwatch(gameID)
 	// Read before deleting: the tombstone remembers where this game was, so
 	// a later re-track puts it back there instead of guessing.
@@ -1406,6 +1423,12 @@ func (d *Daemon) LinkGames(canonicalID, aliasID string) error {
 	}
 	if d.provisioningBlocks(canonicalID) || d.provisioningBlocks(aliasID) {
 		return fmt.Errorf("a game still being configured cannot be linked")
+	}
+	if err := d.refuseFirstCopyGameChange(canonicalID, "link"); err != nil {
+		return err
+	}
+	if err := d.refuseFirstCopyGameChange(aliasID, "link"); err != nil {
+		return err
 	}
 	if _, err := d.Store.GetGame(canonicalID); err != nil {
 		return fmt.Errorf("canonical game %q: %w", canonicalID, err)
@@ -1489,6 +1512,14 @@ func (d *Daemon) LinkGames(canonicalID, aliasID string) error {
 // folder by hand is a smaller cost than that, and it is visible.
 func (d *Daemon) UnlinkGame(aliasID string) error {
 	alias, ok := d.Store.GetGameAlias(aliasID)
+	if err := d.refuseFirstCopyGameChange(aliasID, "unlink"); err != nil {
+		return err
+	}
+	if ok {
+		if err := d.refuseFirstCopyGameChange(alias.GameID, "unlink"); err != nil {
+			return err
+		}
+	}
 	if err := d.Store.RemoveGameAlias(aliasID); err != nil {
 		return err
 	}
@@ -1525,6 +1556,10 @@ func (d *Daemon) UnlinkGame(aliasID string) error {
 // untrackFromPeer mirrors a peer's untrack: remove the game + tombstone it,
 // WITHOUT re-notifying (no loop).
 func (d *Daemon) untrackFromPeer(gameID string) {
+	if err := d.refuseFirstCopyGameChange(gameID, "accept peer untrack for"); err != nil {
+		d.Log.Log("warn", err.Error())
+		return
+	}
 	if d.provisioningBlocks(gameID) {
 		d.Log.Log("info", fmt.Sprintf("ignored a peer untrack of %q while it is still being configured", gameID))
 		return
@@ -1566,6 +1601,10 @@ func (d *Daemon) untrackFromPeer(gameID string) {
 // remembered, the tombstone is simply cleared and auto-track proceeds as it
 // always did.
 func (d *Daemon) retrackFromPeer(gameID string) {
+	if err := d.refuseFirstCopyGameChange(gameID, "accept peer retrack for"); err != nil {
+		d.Log.Log("warn", err.Error())
+		return
+	}
 	name, savePath := d.Store.RememberedGame(gameID)
 	_ = d.Store.ClearUntrackedTombstone(gameID)
 	if savePath == "" {
