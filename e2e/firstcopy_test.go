@@ -27,6 +27,32 @@ func beginCopy(t *testing.T, node *testutil.TestDaemon, gameID, role, peerID str
 	return row
 }
 
+func TestFirstCopy_DivergentTargetIsRefused(t *testing.T) {
+	source := testutil.NewTestDaemon(t, "Diverge-Source")
+	target := testutil.NewTestDaemon(t, "Diverge-Target")
+	source.PairWith(target)
+	const id = "diverge-game"
+	src := sideDir(t, source, "div")
+	tgt := sideDir(t, target, "div")
+	writeHoldFile(t, src, "slot.sav", "SOURCE-BYTES")
+	writeHoldFile(t, tgt, "other.sav", "TARGET-ONLY")
+	createHeld(t, source, id, "Diverge", src)
+	createHeld(t, target, id, "Diverge", tgt)
+	beginCopy(t, source, id, "source", target.NodeID())
+	beginCopy(t, target, id, "target", source.NodeID())
+	target.APIStatus(http.MethodPost, "/api/games/"+id+"/sync", nil, nil)
+	if readHoldFile(t, tgt, "other.sav") != "TARGET-ONLY" || readHoldFile(t, tgt, "slot.sav") != "" {
+		t.Fatal("divergent target was modified")
+	}
+	if readHoldFile(t, src, "slot.sav") != "SOURCE-BYTES" || readHoldFile(t, src, "other.sav") != "" {
+		t.Fatal("source changed while a divergent target was refused")
+	}
+	held, err := target.Daemon.Store.ProvisioningHeld(id)
+	if err != nil || !held {
+		t.Fatal("refusal released the target hold")
+	}
+}
+
 func TestFirstCopy_OnlyNamedTargetReceivesAndSourceIsNotWritten(t *testing.T) {
 	source := testutil.NewTestDaemon(t, "Copy-Source")
 	target := testutil.NewTestDaemon(t, "Copy-Target")
@@ -45,7 +71,6 @@ func TestFirstCopy_OnlyNamedTargetReceivesAndSourceIsNotWritten(t *testing.T) {
 	tgt := sideDir(t, target, "copy")
 	oth := sideDir(t, other, "copy")
 	writeHoldFile(t, src, "slot.sav", "SOURCE-BYTES")
-	writeHoldFile(t, tgt, "other.sav", "TARGET-ONLY")
 	writeHoldFile(t, oth, "third.sav", "THIRD-ONLY")
 	createHeld(t, source, id, "First Copy", src)
 	createHeld(t, target, id, "First Copy", tgt)
@@ -120,18 +145,34 @@ func TestFirstCopy_OnlyNamedTargetReceivesAndSourceIsNotWritten(t *testing.T) {
 		t.Fatal("restart changed the source")
 	}
 	var finished struct {
-		AutoSync bool `json:"autoSync"`
-		Released bool `json:"released"`
+		Released bool   `json:"released"`
+		Phase    string `json:"phase"`
 	}
 	source.API(http.MethodPost, "/api/games/"+id+"/first-copy/finish", map[string]string{"txId": first.TxID}, &finished)
-	if finished.AutoSync || !finished.Released {
-		t.Fatalf("finish = %+v; want released and AutoSync still off", finished)
+	if finished.Released || finished.Phase != "verified" {
+		t.Fatalf("finish = %+v; verification must not lift the hold", finished)
+	}
+	held, err = source.Daemon.Store.ProvisioningHeld(id)
+	if err != nil || !held {
+		t.Fatal("finish released the hold")
+	}
+	if status := other.APIStatus(http.MethodPost, "/api/games/"+id+"/sync", nil, nil); status >= 500 {
+		t.Fatalf("third peer sync after finish: %d", status)
+	}
+	if readHoldFile(t, oth, "slot.sav") != "" || readHoldFile(t, src, "slot.sav") != "SOURCE-BYTES" {
+		t.Fatal("finish let a third peer read or write the source")
+	}
+	var activated struct {
+		Released  bool `json:"released"`
+		AutoSync  bool `json:"autoSync"`
+		LocalOnly bool `json:"localOnly"`
+	}
+	source.API(http.MethodPost, "/api/games/"+id+"/first-copy/activate", map[string]string{"txId": first.TxID}, &activated)
+	if !activated.Released || activated.AutoSync || !activated.LocalOnly {
+		t.Fatalf("activate = %+v", activated)
 	}
 	held, err = source.Daemon.Store.ProvisioningHeld(id)
 	if err != nil || held {
-		t.Fatal("finish left the hold in place")
-	}
-	if lease, err = source.Daemon.Store.ActiveFirstCopy(id); err != nil || lease != nil {
-		t.Fatalf("finish left a lease: %+v %v", lease, err)
+		t.Fatal("activate left the hold")
 	}
 }

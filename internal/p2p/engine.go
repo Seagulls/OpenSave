@@ -691,6 +691,13 @@ func (e *Engine) firstCopyServe(gameID, requester string, read bool) (allowHeldR
 		return false, false, 0, ""
 	}
 	if read && lease.Role == store.FirstCopySource && requester != "" && requester == lease.PeerID {
+		held, err := e.provisioningHeld(gameID)
+		if err != nil {
+			return false, true, http.StatusServiceUnavailable, syncengine.ProvisioningUnreadableMessage
+		}
+		if !held {
+			return false, true, http.StatusConflict, syncengine.FirstCopyDirectionMessage
+		}
 		return true, false, 0, ""
 	}
 	return false, true, http.StatusConflict, syncengine.FirstCopyDirectionMessage

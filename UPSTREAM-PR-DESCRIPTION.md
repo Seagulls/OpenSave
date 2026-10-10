@@ -32,10 +32,21 @@ The target then calls the existing `POST /api/games/{id}/sync`. That sync contac
 POST /api/games/{id}/first-copy/finish
 Content-Type: application/json
 
+{"txId": "<id>", "expectHash": "<source-digest>"}
+```
+
+Finish checks the digest and marks the lease verified. It does not release the hold and does not turn AutoSync on. A third peer is still refused. Repeat finish with the same transaction is safe.
+
+```http
+POST /api/games/{id}/first-copy/activate
+Content-Type: application/json
+
 {"txId": "<id>"}
 ```
 
-Finish drops the lease and releases the hold. `autoSync` defaults to false. `{"autoSync": true}` is explicit. `DELETE /api/games/{id}/first-copy` with `{"txId"}` aborts and leaves the hold.
+Activate deletes the lease and the hold in one transaction, on this device only. `autoSync` defaults to false. Activating the source while an unheld third peer exists lets that peer read. Do that only after both sides are verified. `DELETE` aborts and leaves the hold, including an expired row.
+
+`GET /api/capabilities` and `GET /api/p2p/capabilities` return `{"firstCopy":"1"}`. A missing route or a body without that field is unsupported. Keep the game held.
 
 CLI: `opensave game <id> first-copy --as source|target --peer <peerId>`.
 

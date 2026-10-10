@@ -7,8 +7,6 @@ import (
 	"github.com/go-chi/chi/v5"
 )
 
-// handleBeginFirstCopy records an opt-in, one-peer direction for a held game.
-// It does not release the hold and does not sync. Omitted, nothing here runs.
 func (s *Server) handleBeginFirstCopy(w http.ResponseWriter, r *http.Request) {
 	gameID := chi.URLParam(r, "gameId")
 	var body struct {
@@ -20,7 +18,7 @@ func (s *Server) handleBeginFirstCopy(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	row, err := s.Daemon.Store.BeginFirstCopy(gameID, body.Role, body.PeerID, time.Duration(body.TTLSeconds)*time.Second)
+	row, err := s.Daemon.BeginFirstCopy(gameID, body.Role, body.PeerID, time.Duration(body.TTLSeconds)*time.Second)
 	if err != nil {
 		writeError(w, http.StatusConflict, err.Error())
 		return
@@ -41,13 +39,36 @@ func (s *Server) handleAbortFirstCopy(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"id": gameID, "aborted": true})
+	writeJSON(w, http.StatusOK, map[string]any{"id": gameID, "aborted": true, "held": true})
 }
 
-// handleFinishFirstCopy drops the lease and then releases the hold. autoSync
-// defaults to false: finishing the copy does not start ordinary bidirectional
-// sync unless the caller asks.
+// handleFinishFirstCopy verifies the digest and marks the lease verified.
+// It does not release the hold and does not turn AutoSync on. A third peer
+// is still refused. Activation is a separate call.
 func (s *Server) handleFinishFirstCopy(w http.ResponseWriter, r *http.Request) {
+	gameID := chi.URLParam(r, "gameId")
+	var body struct {
+		TxID       string `json:"txId"`
+		ExpectHash string `json:"expectHash"`
+	}
+	if err := readJSON(r, &body); err != nil || body.TxID == "" {
+		writeError(w, http.StatusBadRequest, "txId is required")
+		return
+	}
+	row, err := s.Daemon.FinishFirstCopy(gameID, body.TxID, body.ExpectHash)
+	if err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id": gameID, "phase": row.Phase, "contentHash": row.ContentHash,
+		"released": false, "autoSync": false, "localOnly": true,
+	})
+}
+
+// handleActivateFirstCopy lifts the hold on this device only, after finish.
+// autoSync defaults to false. The other peer is not activated by this call.
+func (s *Server) handleActivateFirstCopy(w http.ResponseWriter, r *http.Request) {
 	gameID := chi.URLParam(r, "gameId")
 	var body struct {
 		TxID     string `json:"txId"`
@@ -57,29 +78,21 @@ func (s *Server) handleFinishFirstCopy(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "txId is required")
 		return
 	}
-	lease, err := s.Daemon.Store.ActiveFirstCopy(gameID)
-	if err != nil {
-		writeError(w, http.StatusServiceUnavailable, err.Error())
-		return
-	}
-	if lease == nil || lease.TxID != body.TxID {
-		writeError(w, http.StatusConflict, "first-copy transaction does not match")
-		return
-	}
-	if err := s.Daemon.Store.AbortFirstCopy(gameID, body.TxID); err != nil {
-		writeError(w, http.StatusConflict, err.Error())
-		return
-	}
 	enable := false
 	if body.AutoSync != nil {
 		enable = *body.AutoSync
 	}
-	released, err := s.Daemon.ReleaseProvisioningMode(gameID, enable)
+	released, err := s.Daemon.ActivateFirstCopy(gameID, body.TxID, enable)
 	if err != nil {
 		writeError(w, http.StatusConflict, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id": gameID, "released": released, "autoSync": enable,
+		"localOnly": true,
 	})
+}
+
+func (s *Server) handleFirstCopyCapability(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"firstCopy": "1"})
 }

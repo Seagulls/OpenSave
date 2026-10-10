@@ -276,6 +276,7 @@ func (e *Engine) SyncGame(ctx context.Context, gameID string, onlinePeers []Peer
 			return nil, fmt.Errorf("%w: named peer is not reachable", ErrFirstCopyDirection)
 		}
 		onlinePeers = only
+		ctx = fenceFirstCopy(ctx, lease.TxID, lease.Role, lease.PeerID)
 	} else if held {
 		return nil, ErrProvisioning
 	}
@@ -761,11 +762,16 @@ func (e *Engine) SyncWithPeer(ctx context.Context, gameID string, peer Peer) (Re
 	// Released before step 9, which asks the peer to come and read it.
 	applied := e.Writing(gameID)
 
-	// A target-side first copy may adopt the named source. It must not ask
-	// that source to delete or to pull this device's files. A failed lease
-	// read stops the apply: guessing would be permission to write the source.
-	if err := e.dropOutboundFirstCopy(&decision, gameID, peer.ID); err != nil {
+	// A target-side first copy may only pull files the target does not already
+	// have. If the lease is gone, changed, or the target already diverges,
+	// nothing is applied and nothing is asked of the source.
+	if err := e.guardFirstCopy(ctx, &decision, gameID, peer.ID); err != nil {
 		return Result{}, err
+	}
+	if _, fenced := firstCopyFenceFrom(ctx); fenced {
+		if err := firstCopyTreesCompatible(localManifest, remoteData.Manifest); err != nil {
+			return Result{}, err
+		}
 	}
 	// 6. Apply deletions (locally + propagate to peer).
 	deleting := time.Now()
@@ -1402,16 +1408,54 @@ func primaryRootOf(game store.Game) syncRoot {
 	return syncRoot{Name: delta.PrimaryRoot, Path: game.SavePath}
 }
 
-func (e *Engine) dropOutboundFirstCopy(d *Decision, gameID, peerID string) error {
+type firstCopyFenceKey struct{}
+
+type firstCopyFence struct {
+	TxID   string
+	Role   string
+	PeerID string
+}
+
+func firstCopyTreesCompatible(local, remote delta.Manifest) error {
+	for path, file := range local.Files {
+		remoteFile, ok := remote.Files[path]
+		if !ok || remoteFile.Hash != file.Hash {
+			return fmt.Errorf("first copy refused: target already has %s", path)
+		}
+	}
+	return nil
+}
+
+func fenceFirstCopy(ctx context.Context, txID, role, peerID string) context.Context {
+	return context.WithValue(ctx, firstCopyFenceKey{}, firstCopyFence{TxID: txID, Role: role, PeerID: peerID})
+}
+
+func firstCopyFenceFrom(ctx context.Context) (firstCopyFence, bool) {
+	fence, ok := ctx.Value(firstCopyFenceKey{}).(firstCopyFence)
+	return fence, ok && fence.TxID != ""
+}
+
+// guardFirstCopy binds an in-flight target pull to the lease that authorized
+// it. A missing, expired, or different lease is not permission to fall through
+// to a normal bidirectional sync. A target that already has different files
+// is refused before any local delete or peer write.
+func (e *Engine) guardFirstCopy(ctx context.Context, d *Decision, gameID, peerID string) error {
 	if d == nil || e == nil || e.Store == nil {
 		return nil
 	}
+	fence, fenced := firstCopyFenceFrom(ctx)
 	lease, err := e.Store.ActiveFirstCopy(gameID)
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrProvisioningUnreadable, err)
 	}
+	if fenced && (lease == nil || lease.TxID != fence.TxID || lease.Role != fence.Role || lease.PeerID != fence.PeerID || lease.PeerID != peerID) {
+		return fmt.Errorf("%w: lease changed during sync", ErrFirstCopyDirection)
+	}
 	if lease == nil || lease.Role != store.FirstCopyTarget || lease.PeerID != peerID {
 		return nil
+	}
+	if len(d.FilesToDeleteLocally) > 0 || len(d.DirsToDeleteLocally) > 0 || d.HasPush() || len(d.FilesToDeleteOnPeer) > 0 || len(d.DirsToDeleteOnPeer) > 0 {
+		return fmt.Errorf("first copy refused: target is not a clean extension of the source")
 	}
 	d.FilesToPush = nil
 	d.DirsToPush = nil

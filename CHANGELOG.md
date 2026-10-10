@@ -10,9 +10,10 @@ All notable changes to OpenSave are documented here. This project adheres to
 - **Opt-in one-way first copy for one held game and one paired peer.**
   `POST /api/games/{id}/first-copy` with `role` and `peerId` lets that peer
   read a source, or lets this device pull only from that peer. It does not
-  release the hold, and it does not accept a reverse write. Omit it and
-  nothing changes. Finish does not turn AutoSync on unless asked. Depends on
-  the provisioning hold.
+  release the hold, and it does not accept a reverse write. A target that
+  already differs is refused. Finish verifies the digest and does not lift
+  the hold. Activate lifts it on this device only, with AutoSync off unless
+  asked. Omit the route and nothing changes. Depends on the provisioning hold.
 
 - **A game can be tracked or placed without syncing until it is released.**
   `provisioningHold: true` (or `autoSync: false`) on `POST /api/games` and

@@ -192,6 +192,24 @@ func firstCopy(args []string, asJSON bool) int {
 		}
 		success("Aborted the first copy of %s.", bold(gameID))
 		return 0
+	case "activate":
+		if len(args) < 4 {
+			fmt.Fprintln(os.Stderr, gameUsage)
+			return 1
+		}
+		body := map[string]any{"txId": args[3]}
+		if len(args) == 5 && args[4] == "--auto-sync" {
+			body["autoSync"] = true
+		}
+		raw, err := daemonRequest("POST", "/api/games/"+gameID+"/first-copy/activate", body)
+		if err != nil {
+			return fail(asJSON, err)
+		}
+		if asJSON {
+			return emitRawJSON(raw)
+		}
+		success("Activated %s on this device only. AutoSync stays off unless asked.", bold(gameID))
+		return 0
 	case "finish":
 		if len(args) < 4 {
 			fmt.Fprintln(os.Stderr, gameUsage)
@@ -253,7 +271,8 @@ const gameUsage = `usage: opensave game <gameId> set <key> <value>
        opensave game <gameId> release [--no-autosync]
        opensave game <gameId> first-copy --as source|target --peer <peerId>
        opensave game <gameId> first-copy abort <txId>
-       opensave game <gameId> first-copy finish <txId> [--auto-sync]
+       opensave game <gameId> first-copy finish <txId>
+       opensave game <gameId> first-copy activate <txId> [--auto-sync]
                                 clear a provisioning hold. Without --no-autosync,
                                 reconcile may sync it. With --no-autosync, it stays
                                 quiet until an explicit sync.

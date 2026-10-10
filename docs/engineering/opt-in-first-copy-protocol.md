@@ -32,6 +32,8 @@ patched source, because the refusal is on the server. An older source cannot
 enforce a lease a new target expects. The target's sync then fails closed on
 the existing hold refusal. Do not release the hold to compensate.
 
+Finish checks the digest and marks the lease verified. It does not release the hold, so a third peer is still refused. Activate lifts the hold on this device only, with AutoSync off unless asked. Activating one peer does not activate the other. A target that already has a different file is refused before anything is deleted. A source read is allowed only while the hold is still present. An expired lease is not a permission and is not stolen by a different peer.
+
 ## Not in this change
 
 No second sync engine, no peer-targeted ordinary sync, no version vectors,

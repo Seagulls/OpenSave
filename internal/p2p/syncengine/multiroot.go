@@ -212,7 +212,7 @@ func (e *Engine) syncOneRoot(ctx context.Context, gameID string, game store.Game
 	}
 
 	e.handOverEmptying(gameID, peer, local.Files, &decision)
-	if err := e.dropOutboundFirstCopy(&decision, gameID, peer.ID); err != nil {
+	if err := e.guardFirstCopy(ctx, &decision, gameID, peer.ID); err != nil {
 		return err
 	}
 

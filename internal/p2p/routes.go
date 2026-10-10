@@ -38,6 +38,7 @@ func (e *Engine) RegisterRoutes(r chi.Router) {
 		r.Post("/api/p2p/untrack", e.handlePeerUntrack)
 		r.Post("/api/p2p/retrack", e.handlePeerRetrack)
 		r.Get("/api/p2p/games", e.handlePeerGameList)
+		r.Get("/api/p2p/capabilities", e.handleCapabilities)
 		r.Post("/api/p2p/sync-event/{gameId}", e.handleSyncEvent)
 		r.Get("/api/p2p/app-binary", e.handleAppBinary)
 
@@ -50,6 +51,10 @@ func (e *Engine) RegisterRoutes(r chi.Router) {
 			r.Get("/api/sync/trigger/{gameId}", e.handleSyncTrigger)
 		})
 	})
+}
+
+func (e *Engine) handleCapabilities(w http.ResponseWriter, r *http.Request) {
+	jsonOK(w, map[string]any{"firstCopy": "1"})
 }
 
 func clientIP(r *http.Request) string {

@@ -1004,6 +1004,88 @@ func (d *Daemon) ReleaseProvisioningMode(gameID string, enableAutoSync bool) (bo
 	return true, nil
 }
 
+func (d *Daemon) firstCopyDigest(game store.Game) (string, error) {
+	primary, err := delta.BuildManifest(game.SavePath)
+	if err != nil {
+		return "", err
+	}
+	parts := []string{"primary:" + primary.ManifestHash()}
+	roots, err := d.Store.ListGameRoots(game.ID)
+	if err != nil {
+		return "", err
+	}
+	for _, root := range roots {
+		manifest, err := delta.BuildManifest(root.Path)
+		if err != nil {
+			return "", err
+		}
+		parts = append(parts, root.Name+":"+manifest.ManifestHash())
+	}
+	return strings.Join(parts, "\n"), nil
+}
+
+// BeginFirstCopy arms a held game. The digest is the save as it is now.
+func (d *Daemon) BeginFirstCopy(gameID, role, peerID string, ttl time.Duration) (store.FirstCopy, error) {
+	game, err := d.Store.GetGame(gameID)
+	if err != nil {
+		return store.FirstCopy{}, err
+	}
+	digest, err := d.firstCopyDigest(game)
+	if err != nil {
+		return store.FirstCopy{}, err
+	}
+	return d.Store.BeginFirstCopy(gameID, role, peerID, digest, ttl)
+}
+
+// FinishFirstCopy checks the save still matches and marks the lease verified.
+// It does not release the hold. expectHash is the digest the caller observed
+// on the source; a target must match it. A source must still match the digest
+// taken when the lease was armed.
+func (d *Daemon) FinishFirstCopy(gameID, txID, expectHash string) (store.FirstCopy, error) {
+	game, err := d.Store.GetGame(gameID)
+	if err != nil {
+		return store.FirstCopy{}, err
+	}
+	digest, err := d.firstCopyDigest(game)
+	if err != nil {
+		return store.FirstCopy{}, err
+	}
+	lease, err := d.Store.ActiveFirstCopy(gameID)
+	if err != nil {
+		return store.FirstCopy{}, err
+	}
+	if lease == nil || lease.TxID != txID {
+		return store.FirstCopy{}, fmt.Errorf("first-copy transaction does not match")
+	}
+	if lease.Role == store.FirstCopyTarget && digest != expectHash {
+		return store.FirstCopy{}, fmt.Errorf("target digest does not match the source")
+	}
+	if lease.Role == store.FirstCopySource && expectHash != "" && expectHash != digest {
+		return store.FirstCopy{}, fmt.Errorf("source digest does not match the caller")
+	}
+	return d.Store.VerifyFirstCopy(gameID, txID, digest)
+}
+
+// ActivateFirstCopy lifts this device's hold after verification. It does not
+// speak for the other peer. autoSync defaults to false at the API.
+func (d *Daemon) ActivateFirstCopy(gameID, txID string, enableAutoSync bool) (bool, error) {
+	game, err := d.Store.GetGame(gameID)
+	if err != nil {
+		return false, err
+	}
+	released, err := d.Store.ActivateFirstCopy(gameID, txID, enableAutoSync)
+	if err != nil || !released {
+		return released, err
+	}
+	if enableAutoSync {
+		if err := d.watchGame(game.ID, game.SavePath); err != nil &&
+			!errors.Is(err, watcher.ErrStopped) && !errors.Is(err, watcher.ErrSaveFolderMissing) {
+			d.Log.Log("warn", fmt.Sprintf("could not watch %q after activation: %v", game.Name, err))
+		}
+	}
+	return released, nil
+}
+
 // validateSavePath rejects save locations that can never be right: paths
 // that don't exist, whole-profile/system directories, drive roots,
 // OpenSave's own data directory, and paths another game already tracks.

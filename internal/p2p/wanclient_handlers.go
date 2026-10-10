@@ -556,6 +556,9 @@ func (w *WanClient) routeRequest(ctx context.Context, msg RelayMessage) (int, an
 
 	case strings.HasPrefix(route, "/sync/trigger/"):
 		gameID := route[strings.LastIndex(route, "/")+1:]
+		if stop, status, msg := w.engine.peerGameAccess(gameID, msg.From, false); stop {
+			return status, map[string]string{"error": msg}
+		}
 		w.engine.GoSync(func(ctx context.Context) {
 			syncCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 			defer cancel()
