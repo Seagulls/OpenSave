@@ -23,6 +23,9 @@ func cmdGame(d *daemon.Daemon, args []string) int {
 	if len(args) >= 2 && args[1] == "release" {
 		return releaseProvisioning(d, args, asJSON)
 	}
+	if len(args) >= 2 && args[1] == "first-copy" {
+		return firstCopy(args, asJSON)
+	}
 	if len(args) < 2 || args[1] != "set" {
 		fmt.Fprintln(os.Stderr, gameUsage)
 		return 1
@@ -168,8 +171,89 @@ func releaseProvisioning(d *daemon.Daemon, args []string, asJSON bool) int {
 	return 0
 }
 
+func firstCopy(args []string, asJSON bool) int {
+	if len(args) < 3 {
+		fmt.Fprintln(os.Stderr, gameUsage)
+		return 1
+	}
+	gameID := args[0]
+	switch args[2] {
+	case "abort":
+		if len(args) != 4 {
+			fmt.Fprintln(os.Stderr, gameUsage)
+			return 1
+		}
+		raw, err := daemonRequest("DELETE", "/api/games/"+gameID+"/first-copy", map[string]any{"txId": args[3]})
+		if err != nil {
+			return fail(asJSON, err)
+		}
+		if asJSON {
+			return emitRawJSON(raw)
+		}
+		success("Aborted the first copy of %s.", bold(gameID))
+		return 0
+	case "finish":
+		if len(args) < 4 {
+			fmt.Fprintln(os.Stderr, gameUsage)
+			return 1
+		}
+		body := map[string]any{"txId": args[3]}
+		if len(args) == 5 && args[4] == "--auto-sync" {
+			body["autoSync"] = true
+		}
+		raw, err := daemonRequest("POST", "/api/games/"+gameID+"/first-copy/finish", body)
+		if err != nil {
+			return fail(asJSON, err)
+		}
+		if asJSON {
+			return emitRawJSON(raw)
+		}
+		success("Finished the first copy of %s.", bold(gameID))
+		return 0
+	default:
+		role, peer := "", ""
+		for i := 2; i < len(args); i++ {
+			switch args[i] {
+			case "--as":
+				if i+1 >= len(args) {
+					fmt.Fprintln(os.Stderr, gameUsage)
+					return 1
+				}
+				role = args[i+1]
+				i++
+			case "--peer":
+				if i+1 >= len(args) {
+					fmt.Fprintln(os.Stderr, gameUsage)
+					return 1
+				}
+				peer = args[i+1]
+				i++
+			default:
+				fmt.Fprintln(os.Stderr, gameUsage)
+				return 1
+			}
+		}
+		if role == "" || peer == "" {
+			fmt.Fprintln(os.Stderr, gameUsage)
+			return 1
+		}
+		raw, err := daemonRequest("POST", "/api/games/"+gameID+"/first-copy", map[string]any{"role": role, "peerId": peer})
+		if err != nil {
+			return fail(asJSON, err)
+		}
+		if asJSON {
+			return emitRawJSON(raw)
+		}
+		success("First copy armed for %s.", bold(gameID))
+		return 0
+	}
+}
+
 const gameUsage = `usage: opensave game <gameId> set <key> <value>
        opensave game <gameId> release [--no-autosync]
+       opensave game <gameId> first-copy --as source|target --peer <peerId>
+       opensave game <gameId> first-copy abort <txId>
+       opensave game <gameId> first-copy finish <txId> [--auto-sync]
                                 clear a provisioning hold. Without --no-autosync,
                                 reconcile may sync it. With --no-autosync, it stays
                                 quiet until an explicit sync.

@@ -985,6 +985,11 @@ func (d *Daemon) ReleaseProvisioningMode(gameID string, enableAutoSync bool) (bo
 	if err != nil {
 		return false, err
 	}
+	if lease, lerr := d.Store.ActiveFirstCopy(gameID); lerr != nil {
+		return false, lerr
+	} else if lease != nil {
+		return false, fmt.Errorf("a first-copy is still active for %s; finish or abort it before releasing the hold", gameID)
+	}
 	released, err := d.Store.ReleaseProvisioningMode(gameID, enableAutoSync)
 	if err != nil || !released {
 		return released, err

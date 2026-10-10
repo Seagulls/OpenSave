@@ -212,6 +212,9 @@ func (e *Engine) syncOneRoot(ctx context.Context, gameID string, game store.Game
 	}
 
 	e.handOverEmptying(gameID, peer, local.Files, &decision)
+	if err := e.dropOutboundFirstCopy(&decision, gameID, peer.ID); err != nil {
+		return err
+	}
 
 	// Held across the whole apply, as for the main folder: from the first
 	// deletion to the last pull this location is a mixture nobody holds

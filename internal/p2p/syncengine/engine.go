@@ -258,7 +258,25 @@ func (e *Engine) SyncGame(ctx context.Context, gameID string, onlinePeers []Peer
 	if holdErr != nil {
 		return nil, fmt.Errorf("%w: %v", ErrProvisioningUnreadable, holdErr)
 	}
-	if held {
+	lease, leaseErr := e.Store.ActiveFirstCopy(gameID)
+	if leaseErr != nil {
+		return nil, fmt.Errorf("%w: %v", ErrProvisioningUnreadable, leaseErr)
+	}
+	if lease != nil && lease.Role == store.FirstCopySource {
+		return nil, ErrFirstCopyDirection
+	}
+	if lease != nil && lease.Role == store.FirstCopyTarget {
+		var only []Peer
+		for _, peer := range onlinePeers {
+			if peer.ID == lease.PeerID {
+				only = append(only, peer)
+			}
+		}
+		if len(only) == 0 {
+			return nil, fmt.Errorf("%w: named peer is not reachable", ErrFirstCopyDirection)
+		}
+		onlinePeers = only
+	} else if held {
 		return nil, ErrProvisioning
 	}
 	e.mu.Lock()
@@ -743,6 +761,12 @@ func (e *Engine) SyncWithPeer(ctx context.Context, gameID string, peer Peer) (Re
 	// Released before step 9, which asks the peer to come and read it.
 	applied := e.Writing(gameID)
 
+	// A target-side first copy may adopt the named source. It must not ask
+	// that source to delete or to pull this device's files. A failed lease
+	// read stops the apply: guessing would be permission to write the source.
+	if err := e.dropOutboundFirstCopy(&decision, gameID, peer.ID); err != nil {
+		return Result{}, err
+	}
 	// 6. Apply deletions (locally + propagate to peer).
 	deleting := time.Now()
 	e.applyLocalDeletions(gameID, primaryRootOf(game), decision)
@@ -1376,6 +1400,24 @@ type syncRoot struct {
 // primaryRootOf is the single-location view every existing game has.
 func primaryRootOf(game store.Game) syncRoot {
 	return syncRoot{Name: delta.PrimaryRoot, Path: game.SavePath}
+}
+
+func (e *Engine) dropOutboundFirstCopy(d *Decision, gameID, peerID string) error {
+	if d == nil || e == nil || e.Store == nil {
+		return nil
+	}
+	lease, err := e.Store.ActiveFirstCopy(gameID)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrProvisioningUnreadable, err)
+	}
+	if lease == nil || lease.Role != store.FirstCopyTarget || lease.PeerID != peerID {
+		return nil
+	}
+	d.FilesToPush = nil
+	d.DirsToPush = nil
+	d.FilesToDeleteOnPeer = nil
+	d.DirsToDeleteOnPeer = nil
+	return nil
 }
 
 func (e *Engine) applyLocalDeletions(gameID string, root syncRoot, d Decision) {

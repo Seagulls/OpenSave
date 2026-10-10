@@ -30,6 +30,9 @@ func (s *Server) routes(r chi.Router) {
 	r.Get("/api/games", s.handleListGames)
 	r.Post("/api/games", s.handleTrackGame)
 	r.Post("/api/games/{gameId}/release-provisioning", s.handleReleaseProvisioning)
+	r.Post("/api/games/{gameId}/first-copy", s.handleBeginFirstCopy)
+	r.Delete("/api/games/{gameId}/first-copy", s.handleAbortFirstCopy)
+	r.Post("/api/games/{gameId}/first-copy/finish", s.handleFinishFirstCopy)
 	r.Get("/api/suggest-name", s.handleSuggestName)
 	r.Post("/api/games/untrack-bulk", s.handleBulkUntrack)
 

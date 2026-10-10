@@ -446,17 +446,34 @@ func (e *Engine) SyncGame(ctx context.Context, gameID string) (map[string]syncen
 	}
 	// Before pinging anyone. A held game must not be the reason a peer is
 	// contacted, and the refusal must not depend on a peer being online.
+	targetOnly := ""
 	if err := e.refuseIfProvisioning(gameID); err != nil {
-		return nil, err
+		peer, ok, ferr := e.firstCopyTarget(gameID)
+		if ferr != nil || !ok || !errors.Is(err, syncengine.ErrProvisioning) {
+			if ferr != nil {
+				return nil, ferr
+			}
+			return nil, err
+		}
+		targetOnly = peer
 	}
 	if resolved := e.localGameID(gameID); resolved != gameID {
-		if err := e.refuseIfProvisioning(resolved); err != nil {
+		if err := e.refuseIfProvisioning(resolved); err != nil && targetOnly == "" {
 			return nil, err
 		}
 	}
 	gameID = e.localGameID(gameID)
 	e.PingPairedPeers(ctx)
 	online := e.OnlinePeers()
+	if targetOnly != "" {
+		var only []syncengine.Peer
+		for _, peer := range online {
+			if peer.ID == targetOnly {
+				only = append(only, peer)
+			}
+		}
+		online = only
+	}
 	if len(online) == 0 {
 		return nil, ErrNoPeersOnline
 	}
@@ -650,6 +667,46 @@ func (e *Engine) provisioningHeld(gameID string) (bool, error) {
 // provisioningServeRefusal is the HTTP answer for a peer asking for a game
 // that is held, or whose hold cannot be read. refuse is false only when the
 // game is confirmed not held.
+func (e *Engine) firstCopyTarget(gameID string) (string, bool, error) {
+	lease, err := e.Store.ActiveFirstCopy(gameID)
+	if err != nil {
+		return "", false, fmt.Errorf("%w: %v", syncengine.ErrProvisioningUnreadable, err)
+	}
+	if lease == nil || lease.Role != store.FirstCopyTarget {
+		return "", false, nil
+	}
+	return lease.PeerID, true, nil
+}
+
+// firstCopyServe decides a peer read or write while a first-copy lease exists.
+// allowHeldRead is the only exception to a provisioning hold: the named peer
+// may read a source. block is set for every other request, including an
+// unsigned one. No lease leaves both false.
+func (e *Engine) firstCopyServe(gameID, requester string, read bool) (allowHeldRead bool, block bool, status int, msg string) {
+	lease, err := e.Store.ActiveFirstCopy(gameID)
+	if err != nil {
+		return false, true, http.StatusServiceUnavailable, syncengine.ProvisioningUnreadableMessage
+	}
+	if lease == nil {
+		return false, false, 0, ""
+	}
+	if read && lease.Role == store.FirstCopySource && requester != "" && requester == lease.PeerID {
+		return true, false, 0, ""
+	}
+	return false, true, http.StatusConflict, syncengine.FirstCopyDirectionMessage
+}
+
+func (e *Engine) peerGameAccess(gameID, requester string, read bool) (stop bool, status int, msg string) {
+	allow, block, status, msg := e.firstCopyServe(gameID, requester, read)
+	if block {
+		return true, status, msg
+	}
+	if refuse, status, msg := e.provisioningServeRefusal(gameID); refuse && !allow {
+		return true, status, msg
+	}
+	return false, 0, ""
+}
+
 func (e *Engine) provisioningServeRefusal(gameID string) (refuse bool, status int, msg string) {
 	held, err := e.provisioningHeld(gameID)
 	if err != nil {
@@ -693,7 +750,12 @@ func (e *Engine) SyncAllGames(ctx context.Context) {
 		return
 	}
 	for _, g := range games {
-		if _, skip := held[g.ID]; !g.AutoSync || skip {
+		lease, lerr := e.Store.ActiveFirstCopy(g.ID)
+		if lerr != nil {
+			e.Log("warn", "not syncing: a first-copy lease could not be read: "+lerr.Error())
+			return
+		}
+		if _, skip := held[g.ID]; !g.AutoSync || skip || lease != nil {
 			continue
 		}
 		results, err := e.Sync.SyncGame(ctx, g.ID, online)
