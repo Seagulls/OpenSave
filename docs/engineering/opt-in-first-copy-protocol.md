@@ -64,6 +64,8 @@ pre-existing divergent files is refused before first-copy writes. An
 expired nonactivated lease is never a permission and cannot be stolen by a
 different peer. No ordinary game is affected when first copy was not opted in.
 
+Snapshot rollback, single-file restore, branch switch, backup overwrite, and accepting a cloud offer are refused while a first-copy row exists. They proceed normally when no row exists. A refused peer untrack does not write a tombstone or clear lineage.
+
 Game operations are restricted while a first-copy row exists, including the
 activated phase after the native provisioning hold is released: untrack,
 peer-originated untrack/retrack and relink/unlink are refused before metadata

@@ -346,6 +346,10 @@ func (s *Server) handleCloudRestore(w http.ResponseWriter, r *http.Request) {
 
 	// A cloud copy may be another device's: this device's excluded files
 	// stay its own (Manager.RestoreKeeping).
+	if err := s.Daemon.RefuseFirstCopyContentChange(gameID); err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
 	if _, err := s.Daemon.Snapshots.RestoreKeeping(gameID, snapID, ignore.Parse(game.SyncIgnore)); err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("downloaded but restore failed: %v", err))
 		return

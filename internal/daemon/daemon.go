@@ -1355,6 +1355,13 @@ func snapIDToTimestamp(snapID string) string {
 // refuseFirstCopyGameChange keeps peer notifications and user lifecycle
 // actions from removing/redirecting a game while its first-copy authority
 // is staged or activated. Ordinary unfenced games are unchanged.
+// RefuseFirstCopyContentChange rejects a restore, branch switch, or cloud
+// pull that would replace a save while a first-copy row exists. No row means
+// the call is a no-op and ordinary restores proceed.
+func (d *Daemon) RefuseFirstCopyContentChange(gameID string) error {
+	return d.refuseFirstCopyGameChange(gameID, "change the save of")
+}
+
 func (d *Daemon) refuseFirstCopyGameChange(gameID, operation string) error {
 	blocked, err := d.Store.FirstCopyBlocksGameChange(gameID)
 	if err != nil {
@@ -1373,7 +1380,6 @@ func (d *Daemon) UntrackGame(gameID string) error {
 	if err := d.refuseFirstCopyGameChange(gameID, "untrack"); err != nil {
 		return err
 	}
-	d.Watcher.Unwatch(gameID)
 	// Read before deleting: the tombstone remembers where this game was, so
 	// a later re-track puts it back there instead of guessing.
 	name, savePath := "", ""
@@ -1385,6 +1391,7 @@ func (d *Daemon) UntrackGame(gameID string) error {
 	if err := d.Store.DeleteGame(gameID); err != nil {
 		return err
 	}
+	d.Watcher.Unwatch(gameID)
 	// Tombstone stops this device from auto-re-creating the game when a
 	// still-tracking peer asks for its manifest (the "it keeps coming back"
 	// bounce). Propagate the untrack so it registers on paired devices too
@@ -1564,7 +1571,6 @@ func (d *Daemon) untrackFromPeer(gameID string) {
 		d.Log.Log("info", fmt.Sprintf("ignored a peer untrack of %q while it is still being configured", gameID))
 		return
 	}
-	d.Watcher.Unwatch(gameID)
 	// Remember where THIS device kept the game before the record goes. A
 	// re-track on the peer used to bring the game back by auto-tracking from
 	// the peer's manifest request, which invents a local folder by
@@ -1576,9 +1582,13 @@ func (d *Daemon) untrackFromPeer(gameID string) {
 	if game, err := d.Store.GetGame(gameID); err == nil {
 		name, savePath = game.Name, game.SavePath
 	}
-	if err := d.Store.DeleteGame(gameID); err != nil && err != store.ErrNotFound {
-		d.Log.Log("warn", fmt.Sprintf("untrack from peer: delete %q failed: %v", gameID, err))
+	if err := d.Store.DeleteGame(gameID); err != nil {
+		if err != store.ErrNotFound {
+			d.Log.Log("warn", fmt.Sprintf("untrack from peer: delete %q failed: %v", gameID, err))
+			return
+		}
 	}
+	d.Watcher.Unwatch(gameID)
 	_ = d.Store.AddUntrackedTombstone(gameID, name, savePath)
 	// The deletion records describe a folder this device no longer has an
 	// opinion about. Kept, they would outlive the game and could still

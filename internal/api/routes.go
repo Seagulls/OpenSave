@@ -689,6 +689,10 @@ func (s *Server) handleRollback(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "snapshotId is required")
 		return
 	}
+	if err := s.Daemon.RefuseFirstCopyContentChange(gameID); err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
 
 	snap, err := s.Daemon.Snapshots.Restore(gameID, body.SnapshotID)
 	if err != nil {
@@ -732,6 +736,10 @@ func (s *Server) handleSwitchBranch(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := readJSON(r, &body); err != nil || body.Name == "" {
 		writeError(w, http.StatusBadRequest, "name is required")
+		return
+	}
+	if err := s.Daemon.RefuseFirstCopyContentChange(gameID); err != nil {
+		writeError(w, http.StatusConflict, err.Error())
 		return
 	}
 

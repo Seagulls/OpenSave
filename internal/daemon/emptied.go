@@ -154,6 +154,9 @@ func (d *Daemon) AnswerEmptied(gameID, answer string) (EmptiedAnswer, error) {
 		d.Log.Log("info", fmt.Sprintf("the deletion of %q's save files goes to your other devices, which keep a snapshot of them first", game.Name))
 	case EmptiedPutBack:
 		if snap, ok := d.newestWithFiles(gameID); ok {
+			if err := d.RefuseFirstCopyContentChange(gameID); err != nil {
+				return out, err
+			}
 			if _, err := d.Snapshots.Restore(gameID, snap.ID); err != nil {
 				return out, fmt.Errorf("could not put the files back from the snapshot of %s: %w", snap.Timestamp, err)
 			}

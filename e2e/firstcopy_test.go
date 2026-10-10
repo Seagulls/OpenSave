@@ -2,6 +2,7 @@ package e2e
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -56,6 +57,42 @@ func TestFirstCopy_TwoPeerActivate(t *testing.T) {
 	}
 	if readHoldFile(t, src, "slot.sav") != "SOURCE-BYTES" {
 		t.Fatal("two-peer activate changed the source")
+	}
+}
+
+func TestFirstCopy_RollbackCannotOverwriteActivatedSource(t *testing.T) {
+	source := testutil.NewTestDaemon(t, "Restore-Source")
+	target := testutil.NewTestDaemon(t, "Restore-Target")
+	source.PairWith(target)
+	const id = "restore-fence"
+	src := sideDir(t, source, "restore")
+	tgt := sideDir(t, target, "restore")
+	writeHoldFile(t, src, "slot.sav", "BEFORE")
+	createHeld(t, source, id, "Restore Fence", src)
+	createHeld(t, target, id, "Restore Fence", tgt)
+	if !testutil.WaitFor(20*time.Second, func() bool {
+		snaps, err := source.Daemon.Store.ListSnapshots(id, "main")
+		return err == nil && len(snaps) > 0
+	}) {
+		t.Fatal("no snapshot to restore")
+	}
+	snaps, err := source.Daemon.Store.ListSnapshots(id, "main")
+	if err != nil || len(snaps) == 0 {
+		t.Fatal(err)
+	}
+	writeHoldFile(t, src, "slot.sav", "AFTER")
+	lease := beginCopy(t, source, id, "source", target.NodeID())
+	source.API(http.MethodPost, "/api/games/"+id+"/first-copy/finish", map[string]string{"txId": lease.TxID}, nil)
+	source.API(http.MethodPost, "/api/games/"+id+"/first-copy/activate", map[string]string{"txId": lease.TxID}, nil)
+	status := source.APIStatus(http.MethodPost, "/api/games/"+id+"/rollback", map[string]string{"snapshotId": snaps[0].ID}, nil)
+	if status < 400 {
+		t.Fatalf("rollback of an activated first-copy returned %d", status)
+	}
+	if readHoldFile(t, src, "slot.sav") != "AFTER" {
+		t.Fatal("rollback changed an activated source")
+	}
+	if err := source.Daemon.AcceptCloudOffer(id, "missing"); err == nil || !strings.Contains(err.Error(), "first-copy") {
+		t.Fatalf("cloud offer acceptance was not refused: %v", err)
 	}
 }
 
