@@ -668,7 +668,7 @@ func (e *Engine) provisioningHeld(gameID string) (bool, error) {
 // that is held, or whose hold cannot be read. refuse is false only when the
 // game is confirmed not held.
 func (e *Engine) firstCopyTarget(gameID string) (string, bool, error) {
-	lease, err := e.Store.ActiveFirstCopy(gameID)
+	lease, err := e.Store.BoundFirstCopy(gameID)
 	if err != nil {
 		return "", false, fmt.Errorf("%w: %v", syncengine.ErrProvisioningUnreadable, err)
 	}
@@ -683,7 +683,7 @@ func (e *Engine) firstCopyTarget(gameID string) (string, bool, error) {
 // may read a source. block is set for every other request, including an
 // unsigned one. No lease leaves both false.
 func (e *Engine) firstCopyServe(gameID, requester string, read bool) (allowHeldRead bool, block bool, status int, msg string) {
-	lease, err := e.Store.ActiveFirstCopy(gameID)
+	lease, err := e.Store.BoundFirstCopy(gameID)
 	if err != nil {
 		return false, true, http.StatusServiceUnavailable, syncengine.ProvisioningUnreadableMessage
 	}
@@ -691,6 +691,9 @@ func (e *Engine) firstCopyServe(gameID, requester string, read bool) (allowHeldR
 		return false, false, 0, ""
 	}
 	if read && lease.Role == store.FirstCopySource && requester != "" && requester == lease.PeerID {
+		if lease.Phase == store.FirstCopyActivated {
+			return true, false, 0, ""
+		}
 		held, err := e.provisioningHeld(gameID)
 		if err != nil {
 			return false, true, http.StatusServiceUnavailable, syncengine.ProvisioningUnreadableMessage
@@ -757,7 +760,7 @@ func (e *Engine) SyncAllGames(ctx context.Context) {
 		return
 	}
 	for _, g := range games {
-		lease, lerr := e.Store.ActiveFirstCopy(g.ID)
+		lease, lerr := e.Store.BoundFirstCopy(g.ID)
 		if lerr != nil {
 			e.Log("warn", "not syncing: a first-copy lease could not be read: "+lerr.Error())
 			return

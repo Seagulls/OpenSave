@@ -34,6 +34,7 @@ func (s *Server) routes(r chi.Router) {
 	r.Delete("/api/games/{gameId}/first-copy", s.handleAbortFirstCopy)
 	r.Post("/api/games/{gameId}/first-copy/finish", s.handleFinishFirstCopy)
 	r.Post("/api/games/{gameId}/first-copy/activate", s.handleActivateFirstCopy)
+	r.Post("/api/games/{gameId}/first-copy/open", s.handleOpenFirstCopy)
 	r.Get("/api/capabilities", s.handleFirstCopyCapability)
 	r.Get("/api/suggest-name", s.handleSuggestName)
 	r.Post("/api/games/untrack-bulk", s.handleBulkUntrack)

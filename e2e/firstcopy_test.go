@@ -27,6 +27,38 @@ func beginCopy(t *testing.T, node *testutil.TestDaemon, gameID, role, peerID str
 	return row
 }
 
+func TestFirstCopy_TwoPeerActivate(t *testing.T) {
+	source := testutil.NewTestDaemon(t, "Two-Source")
+	target := testutil.NewTestDaemon(t, "Two-Target")
+	source.PairWith(target)
+	const id = "two-peer-game"
+	src := sideDir(t, source, "two")
+	tgt := sideDir(t, target, "two")
+	writeHoldFile(t, src, "slot.sav", "SOURCE-BYTES")
+	createHeld(t, source, id, "Two Peer", src)
+	createHeld(t, target, id, "Two Peer", tgt)
+	srcLease := beginCopy(t, source, id, "source", target.NodeID())
+	beginCopy(t, target, id, "target", source.NodeID())
+	if !testutil.WaitFor(45*time.Second, func() bool {
+		target.API(http.MethodPost, "/api/games/"+id+"/sync", nil, nil)
+		return readHoldFile(t, tgt, "slot.sav") == "SOURCE-BYTES" && fileHash(src, "slot.sav") == fileHash(tgt, "slot.sav")
+	}) {
+		t.Fatal("two-peer copy did not match")
+	}
+	source.API(http.MethodPost, "/api/games/"+id+"/first-copy/finish", map[string]string{"txId": srcLease.TxID}, nil)
+	var activated struct {
+		Released bool `json:"released"`
+		AutoSync bool `json:"autoSync"`
+	}
+	source.API(http.MethodPost, "/api/games/"+id+"/first-copy/activate", map[string]string{"txId": srcLease.TxID}, &activated)
+	if !activated.Released || activated.AutoSync {
+		t.Fatalf("two-peer activate = %+v", activated)
+	}
+	if readHoldFile(t, src, "slot.sav") != "SOURCE-BYTES" {
+		t.Fatal("two-peer activate changed the source")
+	}
+}
+
 func TestFirstCopy_DivergentTargetIsRefused(t *testing.T) {
 	source := testutil.NewTestDaemon(t, "Diverge-Source")
 	target := testutil.NewTestDaemon(t, "Diverge-Target")
@@ -174,5 +206,15 @@ func TestFirstCopy_OnlyNamedTargetReceivesAndSourceIsNotWritten(t *testing.T) {
 	held, err = source.Daemon.Store.ProvisioningHeld(id)
 	if err != nil || held {
 		t.Fatal("activate left the hold")
+	}
+	lease, err = source.Daemon.Store.BoundFirstCopy(id)
+	if err != nil || lease == nil || lease.Phase != "activated" || lease.PeerID != target.NodeID() {
+		t.Fatalf("activate dropped the named-peer fence: %+v %v", lease, err)
+	}
+	if status := other.APIStatus(http.MethodPost, "/api/games/"+id+"/sync", nil, nil); status >= 500 {
+		t.Fatalf("third peer sync after activate: %d", status)
+	}
+	if readHoldFile(t, oth, "slot.sav") != "" || readHoldFile(t, src, "third.sav") != "" || readHoldFile(t, src, "slot.sav") != "SOURCE-BYTES" {
+		t.Fatal("activation exposed the source to a third peer")
 	}
 }

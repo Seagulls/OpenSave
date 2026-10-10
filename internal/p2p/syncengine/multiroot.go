@@ -79,13 +79,17 @@ func (e *Engine) sharedRoots(gameID string, remoteData ManifestResponse) []share
 // been dealt with by the time this runs, and reporting the game as failed
 // because a mods folder was unreadable would be a lie about the thing the
 // user actually cares about.
-func (e *Engine) syncExtraRoots(ctx context.Context, gameID string, game store.Game, peer Peer, remoteData ManifestResponse) {
+func (e *Engine) syncExtraRoots(ctx context.Context, gameID string, game store.Game, peer Peer, remoteData ManifestResponse) error {
 	for _, sr := range e.sharedRoots(gameID, remoteData) {
 		if err := e.syncOneRoot(ctx, gameID, game, peer, sr, remoteData); err != nil {
 			e.Log("warn", fmt.Sprintf("could not sync the %q location of %q with %q: %v",
 				sr.root.Name, game.Name, peer.Name, err))
+			if _, fenced := firstCopyFenceFrom(ctx); fenced {
+				return fmt.Errorf("first-copy extra location %q: %w", sr.root.Name, err)
+			}
 		}
 	}
+	return nil
 }
 
 func (e *Engine) syncOneRoot(ctx context.Context, gameID string, game store.Game, peer Peer, sr sharedRoot, remoteData ManifestResponse) error {
@@ -214,6 +218,11 @@ func (e *Engine) syncOneRoot(ctx context.Context, gameID string, game store.Game
 	e.handOverEmptying(gameID, peer, local.Files, &decision)
 	if err := e.guardFirstCopy(ctx, &decision, gameID, peer.ID); err != nil {
 		return err
+	}
+	if _, fenced := firstCopyFenceFrom(ctx); fenced {
+		if err := firstCopyTreesCompatible(local, remote); err != nil {
+			return fmt.Errorf("first-copy extra location %q: %w", sr.root.Name, err)
+		}
 	}
 
 	// Held across the whole apply, as for the main folder: from the first

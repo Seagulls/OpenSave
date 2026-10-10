@@ -10,10 +10,11 @@ import (
 )
 
 const (
-	FirstCopySource   = "source"
-	FirstCopyTarget   = "target"
-	FirstCopyCopying  = "copying"
-	FirstCopyVerified = "verified"
+	FirstCopySource    = "source"
+	FirstCopyTarget    = "target"
+	FirstCopyCopying   = "copying"
+	FirstCopyVerified  = "verified"
+	FirstCopyActivated = "activated"
 )
 
 // FirstCopy is a durable, game-scoped permission for one paired peer.
@@ -70,6 +71,25 @@ func (s *Store) ActiveFirstCopy(gameID string) (*FirstCopy, error) {
 		return nil, err
 	}
 	return row, nil
+}
+
+// BoundFirstCopy is the direction fence. An activated lease does not expire
+// into open access: other peers stay refused until OpenFirstCopy.
+func (s *Store) BoundFirstCopy(gameID string) (*FirstCopy, error) {
+	if s == nil || gameID == "" {
+		return nil, nil
+	}
+	if err := s.provisioningFault(); err != nil {
+		return nil, err
+	}
+	row, err := s.readFirstCopy(s.db, gameID)
+	if err != nil || row == nil {
+		return nil, err
+	}
+	if row.Phase == FirstCopyActivated || !row.expired(time.Now()) {
+		return row, nil
+	}
+	return nil, nil
 }
 
 // BeginFirstCopy records a lease for a game that is still held. The hold
@@ -203,9 +223,9 @@ func (s *Store) VerifyFirstCopy(gameID, txID, digest string) (FirstCopy, error) 
 	return *row, tx.Commit()
 }
 
-// ActivateFirstCopy deletes the lease and the hold in one transaction.
-// The lease must already be verified and the transaction must match.
-// enableAutoSync is explicit; the default at the API is false.
+// ActivateFirstCopy releases the hold and marks the lease activated, in one
+// transaction. The lease stays, so only the named peer may read. OpenFirstCopy
+// is what removes that fence. An expired verified lease cannot activate.
 func (s *Store) ActivateFirstCopy(gameID, txID string, enableAutoSync bool) (bool, error) {
 	tx, err := s.db.Beginx()
 	if err != nil {
@@ -216,10 +236,17 @@ func (s *Store) ActivateFirstCopy(gameID, txID string, enableAutoSync bool) (boo
 	if err != nil {
 		return false, err
 	}
-	if row == nil || row.TxID != txID || row.Phase != FirstCopyVerified {
-		return false, fmt.Errorf("first-copy is not verified")
+	if row == nil || row.TxID != txID || row.Phase != FirstCopyVerified || row.expired(time.Now()) {
+		return false, fmt.Errorf("first-copy is not verified or has expired")
 	}
-	if _, err := tx.Exec(`DELETE FROM game_first_copies WHERE game_id = ? AND tx_id = ?`, gameID, txID); err != nil {
+	held, err := txHeld(tx, gameID)
+	if err != nil {
+		return false, err
+	}
+	if !held {
+		return false, fmt.Errorf("first-copy cannot activate without its provisioning hold")
+	}
+	if _, err := tx.Exec(`UPDATE game_first_copies SET phase = ? WHERE game_id = ? AND tx_id = ?`, FirstCopyActivated, gameID, txID); err != nil {
 		return false, err
 	}
 	res, err := tx.Exec(`DELETE FROM game_provisioning_holds WHERE game_id = ?`, gameID)
@@ -238,4 +265,25 @@ func (s *Store) ActivateFirstCopy(gameID, txID string, enableAutoSync bool) (boo
 		return false, err
 	}
 	return n > 0, tx.Commit()
+}
+
+// OpenFirstCopy removes an activated direction fence. Until this call, a
+// paired third peer cannot read the game. It does not change AutoSync.
+func (s *Store) OpenFirstCopy(gameID, txID string) error {
+	tx, err := s.db.Beginx()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	row, err := s.readFirstCopy(tx, gameID)
+	if err != nil {
+		return err
+	}
+	if row == nil || row.TxID != txID || row.Phase != FirstCopyActivated {
+		return fmt.Errorf("first-copy is not activated")
+	}
+	if _, err := tx.Exec(`DELETE FROM game_first_copies WHERE game_id = ? AND tx_id = ?`, gameID, txID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }

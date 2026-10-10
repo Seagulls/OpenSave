@@ -44,7 +44,7 @@ Content-Type: application/json
 {"txId": "<id>"}
 ```
 
-Activate deletes the lease and the hold in one transaction, on this device only. `autoSync` defaults to false. Activating the source while an unheld third peer exists lets that peer read. Do that only after both sides are verified. `DELETE` aborts and leaves the hold, including an expired row.
+Activate releases the hold on this device only and keeps the named-peer fence. A third paired device still cannot read. `autoSync` defaults to false. `POST /api/games/{id}/first-copy/open` removes the fence. That is the step that allows other paired peers to read. A count of paired devices is not the rule. An expired verified lease cannot activate. `DELETE` aborts and leaves the hold, including an expired row.
 
 `GET /api/capabilities` and `GET /api/p2p/capabilities` return `{"firstCopy":"1"}`. A missing route or a body without that field is unsupported. Keep the game held.
 

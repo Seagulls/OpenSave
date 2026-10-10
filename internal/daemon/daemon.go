@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -1014,6 +1015,7 @@ func (d *Daemon) firstCopyDigest(game store.Game) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	sort.Slice(roots, func(i, j int) bool { return roots[i].Name < roots[j].Name })
 	for _, root := range roots {
 		manifest, err := delta.BuildManifest(root.Path)
 		if err != nil {
@@ -1072,6 +1074,23 @@ func (d *Daemon) ActivateFirstCopy(gameID, txID string, enableAutoSync bool) (bo
 	game, err := d.Store.GetGame(gameID)
 	if err != nil {
 		return false, err
+	}
+	lease, err := d.Store.ActiveFirstCopy(gameID)
+	if err != nil {
+		return false, err
+	}
+	if lease == nil || lease.TxID != txID || lease.Phase != store.FirstCopyVerified {
+		return false, fmt.Errorf("first-copy is not verified or has expired")
+	}
+	if d.P2P != nil && d.P2P.Sync != nil && d.P2P.Sync.SyncBusy(gameID) {
+		return false, fmt.Errorf("first-copy sync is still in progress")
+	}
+	digest, err := d.firstCopyDigest(game)
+	if err != nil {
+		return false, err
+	}
+	if digest != lease.ContentHash {
+		return false, fmt.Errorf("first-copy files changed after verification; finish again before activation")
 	}
 	released, err := d.Store.ActivateFirstCopy(gameID, txID, enableAutoSync)
 	if err != nil || !released {
