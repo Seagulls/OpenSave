@@ -1071,6 +1071,9 @@ func (d *Daemon) FinishFirstCopy(gameID, txID, expectHash string) (store.FirstCo
 // ActivateFirstCopy lifts this device's hold after verification. It does not
 // speak for the other peer. autoSync defaults to false at the API.
 func (d *Daemon) ActivateFirstCopy(gameID, txID string, enableAutoSync bool) (bool, error) {
+	if enableAutoSync {
+		return false, fmt.Errorf("activated first copy remains isolated; enable AutoSync only after explicit open and convergence checks")
+	}
 	game, err := d.Store.GetGame(gameID)
 	if err != nil {
 		return false, err
@@ -1103,6 +1106,39 @@ func (d *Daemon) ActivateFirstCopy(gameID, txID string, enableAutoSync bool) (bo
 		}
 	}
 	return released, nil
+}
+
+// OpenFirstCopy deliberately expands access to other paired peers.
+// It revalidates local content immediately before Open, but DOES NOT prove
+// the other endpoint is ready. The orchestration caller must independently
+// verify both peers are activated with matching full-root digests and obtain
+// explicit authorization before calling this method. Do not auto-open.
+func (d *Daemon) OpenFirstCopy(gameID, txID, expectedHash string) error {
+	if expectedHash == "" {
+		return fmt.Errorf("first-copy open requires the verified expected digest")
+	}
+	game, err := d.Store.GetGame(gameID)
+	if err != nil {
+		return err
+	}
+	lease, err := d.Store.BoundFirstCopy(gameID)
+	if err != nil {
+		return err
+	}
+	if lease == nil || lease.TxID != txID || lease.Phase != store.FirstCopyActivated || lease.ContentHash != expectedHash {
+		return fmt.Errorf("first-copy open requires a matching activated transaction and verified digest")
+	}
+	if d.P2P != nil && d.P2P.Sync != nil && d.P2P.Sync.SyncBusy(gameID) {
+		return fmt.Errorf("first-copy open refused while a sync is in progress")
+	}
+	digest, err := d.firstCopyDigest(game)
+	if err != nil {
+		return err
+	}
+	if digest != expectedHash {
+		return fmt.Errorf("first-copy content changed after activation; opening other peers is unsafe")
+	}
+	return d.Store.OpenFirstCopy(gameID, txID)
 }
 
 // validateSavePath rejects save locations that can never be right: paths

@@ -93,18 +93,20 @@ func (s *Server) handleActivateFirstCopy(w http.ResponseWriter, r *http.Request)
 	})
 }
 
-// handleOpenFirstCopy removes the named-peer fence. Until this call, other
-// paired peers cannot read the game. It does not change AutoSync.
+// handleOpenFirstCopy expands this game's access to other paired peers.
+// The caller must already have independently confirmed BOTH devices are
+// ready; a local digest check is not remote attestation. AutoSync stays off.
 func (s *Server) handleOpenFirstCopy(w http.ResponseWriter, r *http.Request) {
 	gameID := chi.URLParam(r, "gameId")
 	var body struct {
-		TxID string `json:"txId"`
+		TxID       string `json:"txId"`
+		ExpectHash string `json:"expectHash"`
 	}
-	if err := readJSON(r, &body); err != nil || body.TxID == "" {
-		writeError(w, http.StatusBadRequest, "txId is required")
+	if err := readJSON(r, &body); err != nil || body.TxID == "" || body.ExpectHash == "" {
+		writeError(w, http.StatusBadRequest, "txId and expectHash are required")
 		return
 	}
-	if err := s.Daemon.Store.OpenFirstCopy(gameID, body.TxID); err != nil {
+	if err := s.Daemon.OpenFirstCopy(gameID, body.TxID, body.ExpectHash); err != nil {
 		writeError(w, http.StatusConflict, err.Error())
 		return
 	}

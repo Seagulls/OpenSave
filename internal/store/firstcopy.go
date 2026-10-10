@@ -22,9 +22,9 @@ const (
 // device accepts no changes to it. Role target: this device may pull from
 // that peer only, and it does not serve the game back.
 //
-// Phase copying is the transfer. Phase verified means this device has checked
-// its own digest. Neither phase releases the hold. Activate does that, in the
-// same transaction that deletes the lease.
+// Phase copying is the transfer. Phase verified records a checked digest;
+// both keep the hold. Activate atomically releases the hold but RETAINS the
+// named-peer lease as an activated direction fence until explicit Open.
 type FirstCopy struct {
 	GameID      string `db:"game_id" json:"gameId"`
 	TxID        string `db:"tx_id" json:"txId"`
@@ -172,10 +172,34 @@ func txHeld(tx rowQuery, gameID string) (bool, error) {
 	return true, nil
 }
 
-// AbortFirstCopy removes the lease when the transaction matches, including
-// an expired row. The hold stays. A mismatch does not delete the row.
+// AbortFirstCopy removes only a pre-activation transaction, including an
+// expired one. After activation the lease is the only protection remaining:
+// Abort must never remove that fence. Only OpenFirstCopy may remove it.
 func (s *Store) AbortFirstCopy(gameID, txID string) error {
-	res, err := s.db.Exec(`DELETE FROM game_first_copies WHERE game_id = ? AND tx_id = ?`, gameID, txID)
+	tx, err := s.db.Beginx()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	row, err := s.readFirstCopy(tx, gameID)
+	if err != nil {
+		return err
+	}
+	if row == nil || row.TxID != txID {
+		return fmt.Errorf("first-copy transaction does not match")
+	}
+	if row.Phase != FirstCopyCopying && row.Phase != FirstCopyVerified {
+		return fmt.Errorf("first-copy abort refused in phase %q; activated access requires explicit open", row.Phase)
+	}
+	held, err := txHeld(tx, gameID)
+	if err != nil {
+		return err
+	}
+	if !held {
+		return fmt.Errorf("first-copy abort refused: provisioning hold is missing")
+	}
+	res, err := tx.Exec(`DELETE FROM game_first_copies WHERE game_id = ? AND tx_id = ? AND phase IN (?, ?)`,
+		gameID, txID, FirstCopyCopying, FirstCopyVerified)
 	if err != nil {
 		return err
 	}
@@ -183,10 +207,10 @@ func (s *Store) AbortFirstCopy(gameID, txID string) error {
 	if err != nil {
 		return err
 	}
-	if n == 0 {
-		return fmt.Errorf("no first-copy %s for %s", txID, gameID)
+	if n != 1 {
+		return fmt.Errorf("first-copy changed during abort")
 	}
-	return nil
+	return tx.Commit()
 }
 
 // VerifyFirstCopy records that this device's digest still matches. It does
@@ -205,8 +229,16 @@ func (s *Store) VerifyFirstCopy(gameID, txID, digest string) (FirstCopy, error) 
 	if row == nil || row.expired(time.Now()) || row.TxID != txID {
 		return FirstCopy{}, fmt.Errorf("first-copy transaction does not match")
 	}
-	if row.Phase == FirstCopyVerified && row.ContentHash == digest {
+	switch row.Phase {
+	case FirstCopyVerified:
+		if row.ContentHash != digest {
+			return FirstCopy{}, fmt.Errorf("verified first-copy digest changed")
+		}
 		return *row, nil
+	case FirstCopyCopying:
+		// This is the only state which may advance to verified.
+	default:
+		return FirstCopy{}, fmt.Errorf("first-copy finish refused in phase %q", row.Phase)
 	}
 	if row.Role == FirstCopySource && row.ContentHash != digest {
 		return FirstCopy{}, fmt.Errorf("source changed since the first copy was armed")
@@ -214,9 +246,13 @@ func (s *Store) VerifyFirstCopy(gameID, txID, digest string) (FirstCopy, error) 
 	if row.Role == FirstCopyTarget && digest == "" {
 		return FirstCopy{}, fmt.Errorf("target verification requires the source digest")
 	}
-	if _, err := tx.Exec(`UPDATE game_first_copies SET phase = ?, content_hash = ? WHERE game_id = ? AND tx_id = ?`,
-		FirstCopyVerified, digest, gameID, txID); err != nil {
+	res, err := tx.Exec(`UPDATE game_first_copies SET phase = ?, content_hash = ? WHERE game_id = ? AND tx_id = ? AND phase = ?`,
+		FirstCopyVerified, digest, gameID, txID, FirstCopyCopying)
+	if err != nil {
 		return FirstCopy{}, err
+	}
+	if n, err := res.RowsAffected(); err != nil || n != 1 {
+		return FirstCopy{}, fmt.Errorf("first-copy state changed while finishing: affected=%d err=%v", n, err)
 	}
 	row.Phase = FirstCopyVerified
 	row.ContentHash = digest
@@ -227,6 +263,11 @@ func (s *Store) VerifyFirstCopy(gameID, txID, digest string) (FirstCopy, error) 
 // transaction. The lease stays, so only the named peer may read. OpenFirstCopy
 // is what removes that fence. An expired verified lease cannot activate.
 func (s *Store) ActivateFirstCopy(gameID, txID string, enableAutoSync bool) (bool, error) {
+	// An activated target is intentionally quarantined until Open. Native
+	// AutoSync would be skipped/refused; accepting true would be misleading.
+	if enableAutoSync {
+		return false, fmt.Errorf("first-copy activation keeps AutoSync disabled until the named-peer fence is explicitly opened")
+	}
 	tx, err := s.db.Beginx()
 	if err != nil {
 		return false, err
@@ -257,11 +298,7 @@ func (s *Store) ActivateFirstCopy(gameID, txID string, enableAutoSync bool) (boo
 	if err != nil {
 		return false, err
 	}
-	auto := 0
-	if enableAutoSync {
-		auto = 1
-	}
-	if _, err := tx.Exec(`UPDATE games SET auto_sync = ? WHERE id = ?`, auto, gameID); err != nil {
+	if _, err := tx.Exec(`UPDATE games SET auto_sync = 0 WHERE id = ?`, gameID); err != nil {
 		return false, err
 	}
 	return n > 0, tx.Commit()
@@ -282,8 +319,23 @@ func (s *Store) OpenFirstCopy(gameID, txID string) error {
 	if row == nil || row.TxID != txID || row.Phase != FirstCopyActivated {
 		return fmt.Errorf("first-copy is not activated")
 	}
-	if _, err := tx.Exec(`DELETE FROM game_first_copies WHERE game_id = ? AND tx_id = ?`, gameID, txID); err != nil {
+	held, err := txHeld(tx, gameID)
+	if err != nil {
 		return err
+	}
+	if held {
+		return fmt.Errorf("first-copy open refused: provisioning hold unexpectedly remains")
+	}
+	res, err := tx.Exec(`DELETE FROM game_first_copies WHERE game_id = ? AND tx_id = ? AND phase = ?`, gameID, txID, FirstCopyActivated)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n != 1 {
+		return fmt.Errorf("first-copy changed during open")
 	}
 	return tx.Commit()
 }
