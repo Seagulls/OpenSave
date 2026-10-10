@@ -217,4 +217,25 @@ func TestFirstCopy_OnlyNamedTargetReceivesAndSourceIsNotWritten(t *testing.T) {
 	if readHoldFile(t, oth, "slot.sav") != "" || readHoldFile(t, src, "third.sav") != "" || readHoldFile(t, src, "slot.sav") != "SOURCE-BYTES" {
 		t.Fatal("activation exposed the source to a third peer")
 	}
+	// An out-of-order Abort, Finish or Open must not weaken an activated fence.
+	if status := source.APIStatus(http.MethodDelete, "/api/games/"+id+"/first-copy", map[string]string{"txId": first.TxID}, nil); status < 400 {
+		t.Fatalf("delayed abort unexpectedly returned %d after activation", status)
+	}
+	if status := source.APIStatus(http.MethodPost, "/api/games/"+id+"/first-copy/finish", map[string]string{"txId": first.TxID}, nil); status < 400 {
+		t.Fatalf("late finish unexpectedly returned %d after activation", status)
+	}
+	if status := source.APIStatus(http.MethodPost, "/api/games/"+id+"/first-copy/open", map[string]string{"txId": first.TxID, "expectHash": "bogus"}, nil); status < 400 {
+		t.Fatalf("open with an unverified digest unexpectedly returned %d", status)
+	}
+	source.Restart()
+	lease, err = source.Daemon.Store.BoundFirstCopy(id)
+	if err != nil || lease == nil || lease.Phase != "activated" || lease.PeerID != target.NodeID() {
+		t.Fatalf("late lifecycle operation or restart removed fence: %+v %v", lease, err)
+	}
+	if status := other.APIStatus(http.MethodPost, "/api/games/"+id+"/sync", nil, nil); status >= 500 {
+		t.Fatalf("third peer sync after restart returned %d", status)
+	}
+	if readHoldFile(t, oth, "slot.sav") != "" || readHoldFile(t, src, "third.sav") != "" || readHoldFile(t, src, "slot.sav") != "SOURCE-BYTES" {
+		t.Fatal("third peer exchanged files after delayed abort/finish and restart")
+	}
 }

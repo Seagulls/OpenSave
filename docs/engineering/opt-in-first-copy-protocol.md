@@ -21,8 +21,12 @@ One durable lease per game:
   and only to pull. This device does not serve the game, and it does not ask
   the source to delete or to pull.
 
-The game stays held until `POST /first-copy/finish`. Finish drops the lease
-and releases the hold. `autoSync` defaults to false.
+The game stays held through `POST /first-copy/finish`. Finish records
+verification but does not release the hold. `POST /first-copy/activate`
+atomically releases only this device's hold and retains a durable named-peer
+fence. Activated mode intentionally does not synchronize; AutoSync must remain
+off until a separate, verified `open` operation. This applies only to games
+that explicitly entered first copy.
 
 A crashed process keeps the row. Restart does not watch a held game and does
 not treat a failed lease read as permission to sync.
@@ -32,7 +36,33 @@ patched source, because the refusal is on the server. An older source cannot
 enforce a lease a new target expects. The target's sync then fails closed on
 the existing hold refusal. Do not release the hold to compensate.
 
-Finish checks the digest and marks the lease verified. It does not release the hold. Activate releases the hold on this device only and keeps the named-peer fence, so a third paired device still cannot read. Open removes that fence. AutoSync stays off unless activate is asked to turn it on. A count of paired devices is not the isolation rule. A target that already has a different file is refused before anything is deleted. A source read is allowed only while the hold is still present. An expired lease is not a permission and is not stolen by a different peer.
+## Transaction states and safe handover
+
+- `copying -> verified`: `Finish` verifies the per-game/all-roots digest. A
+  repeated Finish with the identical digest may succeed only in `verified`.
+- `verified -> activated`: `Activate` revalidates content and removes this
+  device's hold, preserving the named-peer fence; `autoSync=true` is rejected
+  rather than promising synchronization that the fence currently suppresses.
+- `activated -> open`: explicit `POST /api/games/{id}/first-copy/open` with
+  `{"txId":"...","expectHash":"..."}` revalidates the local digest and
+  removes the fence, but NEVER turns AutoSync on by itself.
+- Abort works only in `copying` or `verified` while the provisioning hold
+  still exists. It cannot delete an activated fence. Finish cannot demote
+  `activated` back to `verified`. Original lease expiry cannot open access.
+
+`Open` is a PERMISSION EXPANSION: a signed paired third peer can read once the
+fence has been removed. **Local digest comparison is not remote attestation.**
+The caller (e.g. SaveSync) MUST separately prove both devices are activated,
+with matching current full-root digests and intended peer identities, and
+obtain explicit permission before opening either side. This PR does not
+implement distributed handover, source-frozen transfers or mixed-version WAN
+acceptance. It is NOT approved for hardware testing. Do not automatically
+invoke `Open` from an activation retry or timeout.
+
+A count of paired devices is not an authorization rule. A target with
+pre-existing divergent files is refused before first-copy writes. An
+expired nonactivated lease is never a permission and cannot be stolen by a
+different peer. No ordinary game is affected when first copy was not opted in.
 
 ## Not in this change
 
