@@ -1,0 +1,133 @@
+package cloud
+
+import (
+	"bytes"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/opensave/opensave/internal/store"
+)
+
+func baselineWebDAVService(t *testing.T, handler http.Handler) *Service {
+	t.Helper()
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+	svc, db := newTestService(t)
+	setCloudConfig(t, db, func(c *store.CloudConfig) {
+		c.Enabled = true
+		c.Provider = "webdav"
+		c.URL = server.URL + "/dav"
+	})
+	return svc
+}
+
+func TestBaselineWitness44UnavailableHEADMasksTruncation(t *testing.T) {
+	payload := []byte(strings.Repeat("synthetic zip bytes", 9))
+	var stored []byte
+	svc := baselineWebDAVService(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPut:
+			body, _ := io.ReadAll(r.Body)
+			stored = append([]byte(nil), body[:len(body)/3]...)
+			w.WriteHeader(http.StatusCreated)
+		case http.MethodHead:
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}
+	}))
+	src := filepath.Join(t.TempDir(), "snap.zip")
+	if err := os.WriteFile(src, payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Upload(src, "game__main__snap_1.zip"); err != nil {
+		t.Fatalf("baseline no longer reproduces: Upload returned %v", err)
+	}
+	if len(stored) != len(payload)/3 {
+		t.Fatalf("stored %d bytes, want truncated %d", len(stored), len(payload)/3)
+	}
+}
+
+func TestBaselineWitness44SameLengthCorruption(t *testing.T) {
+	payload := []byte(strings.Repeat("synthetic zip bytes", 9))
+	var stored []byte
+	svc := baselineWebDAVService(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPut:
+			stored, _ = io.ReadAll(r.Body)
+			stored[len(stored)/2] ^= 0xff
+			w.WriteHeader(http.StatusCreated)
+		case http.MethodHead:
+			w.Header().Set("Content-Length", fmt.Sprint(len(stored)))
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	src := filepath.Join(t.TempDir(), "snap.zip")
+	if err := os.WriteFile(src, payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Upload(src, "game__main__snap_1.zip"); err != nil {
+		t.Fatalf("baseline no longer reproduces: Upload returned %v", err)
+	}
+	if bytes.Equal(stored, payload) || len(stored) != len(payload) {
+		t.Fatal("fixture did not preserve length while corrupting bytes")
+	}
+}
+
+func TestBaselineWitness45FailedRetryReplacesGoodArchive(t *testing.T) {
+	good := []byte(strings.Repeat("complete original archive", 7))
+	retry := []byte(strings.Repeat("replacement archive", 8))
+	stored := append([]byte(nil), good...)
+	svc := baselineWebDAVService(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPut:
+			body, _ := io.ReadAll(r.Body)
+			stored = append([]byte(nil), body[:len(body)/3]...)
+			w.WriteHeader(http.StatusCreated)
+		case http.MethodHead:
+			w.Header().Set("Content-Length", fmt.Sprint(len(stored)))
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	src := filepath.Join(t.TempDir(), "snap.zip")
+	if err := os.WriteFile(src, retry, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Upload(src, "game__main__snap_1.zip"); err == nil {
+		t.Fatal("baseline should notice the truncated retry")
+	}
+	if bytes.Equal(stored, good) || len(stored) != len(retry)/3 {
+		t.Fatalf("negative witness failed: final object has %d bytes", len(stored))
+	}
+}
+
+func TestBaselineWitness46MissingShareLooksEmptyAndAcceptsFallbackWrite(t *testing.T) {
+	root := t.TempDir()
+	mountpoint := filepath.Join(root, "nas")
+	disconnectedNAS := filepath.Join(root, "nas-disconnected")
+	if err := os.Mkdir(mountpoint, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(mountpoint, disconnectedNAS); err != nil {
+		t.Fatal(err)
+	}
+	p := localFolder{cfg: store.CloudConfig{URL: mountpoint}}
+	files, err := p.list()
+	if err != nil || len(files) != 0 {
+		t.Fatalf("baseline no longer reproduces empty-success listing: files=%+v err=%v", files, err)
+	}
+	const name = "game__main__snap_1.zip"
+	if err := p.put(strings.NewReader("synthetic zip"), name); err != nil {
+		t.Fatalf("baseline fallback upload: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(mountpoint, name)); err != nil {
+		t.Fatalf("fallback object missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(disconnectedNAS, name)); !os.IsNotExist(err) {
+		t.Fatalf("disconnected NAS unexpectedly contains object: %v", err)
+	}
+}
