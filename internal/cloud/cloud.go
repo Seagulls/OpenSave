@@ -159,7 +159,9 @@ func (s *Service) transferClient() *http.Client {
 	return &http.Client{Timeout: 0}
 }
 
-const perRequestTransferTimeout = 30 * time.Minute
+// A variable so provider tests can exercise deadline failures without waiting
+// for the production window.
+var perRequestTransferTimeout = 30 * time.Minute
 
 // doTransfer runs one bulk-data request with a per-request deadline and
 // returns the response. Caller closes the body.

@@ -1,6 +1,7 @@
 package cloud
 
 import (
+	"crypto/sha256"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -25,6 +26,10 @@ func (p webDAV) upload(f *os.File, size int64, fileName string) error {
 	if p.cfg.URL == "" {
 		return fmt.Errorf("no destination URL configured")
 	}
+	localHash, err := hashFile(f)
+	if err != nil {
+		return fmt.Errorf("hash WebDAV upload source: %w", err)
+	}
 	target := joinURL(p.cfg.URL, url.PathEscape(fileName))
 	req, err := http.NewRequest(http.MethodPut, target, f)
 	if err != nil {
@@ -42,22 +47,61 @@ func (p webDAV) upload(f *os.File, size int64, fileName string) error {
 	if err := transferOK(resp); err != nil {
 		return err
 	}
-	// Trust but verify: a server that accepted the PUT but stored a
-	// truncated/empty file (quota, proxy, redirect quirks) must fail the
-	// upload loudly, not sit as a silently useless backup.
-	head, err := http.NewRequest(http.MethodHead, target, nil)
-	if err == nil {
-		applyCustomHeaders(head, p.cfg.HeadersJSON)
-		applyBasicAuth(head, p.cfg.Username, p.cfg.Password)
-		if hresp, herr := p.s.doTransfer(head); herr == nil {
-			hresp.Body.Close()
-			if hresp.StatusCode < 300 && hresp.ContentLength >= 0 && hresp.ContentLength != size {
-				return fmt.Errorf("WebDAV upload verification failed: server stored %d of %d bytes for %s",
-					hresp.ContentLength, size, fileName)
-			}
-		}
+
+	// A successful PUT only says that the server accepted the request. Read the
+	// object back and compare its digest so a truncated or same-length-corrupt
+	// object is never reported as a verified upload. GET is deliberate here:
+	// Content-Length from HEAD cannot prove byte integrity, and some otherwise
+	// usable WebDAV implementations do not implement HEAD reliably.
+	remoteHash, remoteSize, err := p.hashRemote(target, size)
+	if err != nil {
+		return fmt.Errorf("WebDAV upload verification failed for %s: %w", fileName, err)
+	}
+	if remoteSize != size || remoteHash != localHash {
+		return fmt.Errorf("WebDAV upload verification failed for %s: remote content differs (stored %d of %d bytes)",
+			fileName, remoteSize, size)
 	}
 	return nil
+}
+
+func hashFile(f *os.File) ([sha256.Size]byte, error) {
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return [sha256.Size]byte{}, err
+	}
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return [sha256.Size]byte{}, err
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return [sha256.Size]byte{}, err
+	}
+	return [sha256.Size]byte(h.Sum(nil)), nil
+}
+
+func (p webDAV) hashRemote(target string, expectedSize int64) ([sha256.Size]byte, int64, error) {
+	req, err := http.NewRequest(http.MethodGet, target, nil)
+	if err != nil {
+		return [sha256.Size]byte{}, 0, err
+	}
+	applyCustomHeaders(req, p.cfg.HeadersJSON)
+	applyBasicAuth(req, p.cfg.Username, p.cfg.Password)
+	resp, err := p.s.doTransfer(req)
+	if err != nil {
+		return [sha256.Size]byte{}, 0, err
+	}
+	defer resp.Body.Close()
+	if err := transferOK(resp); err != nil {
+		return [sha256.Size]byte{}, 0, err
+	}
+	if resp.ContentLength >= 0 && resp.ContentLength != expectedSize {
+		return [sha256.Size]byte{}, resp.ContentLength, nil
+	}
+	h := sha256.New()
+	n, err := io.Copy(h, io.LimitReader(resp.Body, expectedSize+1))
+	if err != nil {
+		return [sha256.Size]byte{}, n, err
+	}
+	return [sha256.Size]byte(h.Sum(nil)), n, nil
 }
 
 // list issues a Depth-1 PROPFIND and parses the multistatus XML.
