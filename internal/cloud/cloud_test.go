@@ -91,6 +91,7 @@ func TestLocalFolderRoundTrip(t *testing.T) {
 func TestWebDAVProvider(t *testing.T) {
 	var uploaded []byte
 	var gotAuth string
+	verificationReads := 0
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth = r.Header.Get("Authorization")
@@ -119,6 +120,11 @@ func TestWebDAVProvider(t *testing.T) {
   </D:response>
 </D:multistatus>`)
 		case http.MethodGet:
+			if verificationReads == 0 {
+				verificationReads++
+				_, _ = w.Write(uploaded)
+				return
+			}
 			fmt.Fprint(w, "webdav content")
 		}
 	}))
