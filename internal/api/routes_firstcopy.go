@@ -114,5 +114,5 @@ func (s *Server) handleOpenFirstCopy(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleFirstCopyCapability(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"firstCopy": "3"})
+	writeJSON(w, http.StatusOK, map[string]any{"firstCopy": "4"})
 }

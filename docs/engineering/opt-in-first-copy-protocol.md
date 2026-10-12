@@ -131,3 +131,13 @@ No second sync engine, no peer-targeted ordinary sync, no version vectors,
 no automatic distributed Open and no automatic enablement of bidirectional
 AutoSync. Phase B adds an authenticated remote receipt but not distributed
 commit or remote filesystem measurement.
+
+## Stacked Phase C.1 preparation (no automatic Open)
+
+The next opt-in phase records separate durable local operator intent and a
+pairing-key signed remote prepare, bound to Phase B receipts and the same
+source generation and transaction pair. Preparation expires for readiness
+purposes, rejects authenticated replay after reboot, and never removes a
+first-copy fence or enables AutoSync. See
+`docs/engineering/first-copy-phase-c-preparation.md` for the operator contract,
+fault boundary and deferred distributed commit semantics.
