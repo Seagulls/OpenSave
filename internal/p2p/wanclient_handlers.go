@@ -369,6 +369,7 @@ func (w *WanClient) routeRequest(ctx context.Context, msg RelayMessage) (int, an
 		strings.HasPrefix(route, "/delete-file/") ||
 		strings.HasPrefix(route, "/first-copy/receipt/") ||
 		strings.HasPrefix(route, "/first-copy/handover/prepare/") ||
+		strings.HasPrefix(route, "/first-copy/handover/decision/") ||
 		route == "/games" ||
 		route == "/unpair" ||
 		route == "/untrack" ||
@@ -562,6 +563,20 @@ func (w *WanClient) routeRequest(ctx context.Context, msg RelayMessage) (int, an
 		}
 		gameID := strings.TrimPrefix(route, "/first-copy/handover/prepare/")
 		if err := w.engine.acceptFirstCopyHandoverPrepare(gameID, msg.From, msg.Nonce, prepare); err != nil {
+			return 409, map[string]string{"error": err.Error()}
+		}
+		return 200, map[string]any{"accepted": true, "opened": false, "autoSync": false, "fenceActive": true}
+
+	case strings.HasPrefix(route, "/first-copy/handover/decision/"):
+		if msg.Method != "POST" || len(msg.Body) > 32768 {
+			return 400, map[string]string{"error": "invalid decision method or size"}
+		}
+		var decision store.FirstCopyDecisionMessage
+		if err := json.Unmarshal(msg.Body, &decision); err != nil {
+			return 400, map[string]string{"error": "malformed handover decision"}
+		}
+		gameID := strings.TrimPrefix(route, "/first-copy/handover/decision/")
+		if err := w.engine.acceptFirstCopyDecision(gameID, msg.From, msg.Nonce, decision); err != nil {
 			return 409, map[string]string{"error": err.Error()}
 		}
 		return 200, map[string]any{"accepted": true, "opened": false, "autoSync": false, "fenceActive": true}

@@ -345,6 +345,23 @@ func (s *Store) CancelFirstCopyHandover(gameID, txID string) error {
 	if row == nil || row.TxID != txID || row.Phase != FirstCopyActivated {
 		return fmt.Errorf("handover cancellation requires matching activated fence")
 	}
+	decision, err := s.readDecision(tx, gameID)
+	if err != nil {
+		return err
+	}
+	if decision != nil {
+		if decision.Phase == DecisionCommitted {
+			return fmt.Errorf("committed handover decision requires coordinated recovery")
+		}
+		if _, err := tx.Exec(`INSERT OR IGNORE INTO game_first_copy_handover_cancelled_decisions
+            (game_id,decision_id) VALUES (?,?)`, gameID, decision.DecisionID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`DELETE FROM game_first_copy_handover_decisions
+            WHERE game_id=? AND local_tx_id=?`, gameID, txID); err != nil {
+			return err
+		}
+	}
 	if _, err := tx.Exec(`DELETE FROM game_first_copy_handover_local WHERE game_id=? AND local_tx_id=?`, gameID, txID); err != nil {
 		return err
 	}

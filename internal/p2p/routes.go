@@ -44,6 +44,7 @@ func (e *Engine) RegisterRoutes(r chi.Router) {
 		r.Post("/api/p2p/sync-event/{gameId}", e.handleSyncEvent)
 		r.Post("/api/p2p/first-copy/receipt/{gameId}", e.handleFirstCopyRemoteReceipt)
 		r.Post("/api/p2p/first-copy/handover/prepare/{gameId}", e.handleFirstCopyHandoverPrepare)
+		r.Post("/api/p2p/first-copy/handover/decision/{gameId}", e.handleFirstCopyDecision)
 		r.Get("/api/p2p/app-binary", e.handleAppBinary)
 
 		// What moves save data, or starts a sync: refused while paused.
@@ -58,7 +59,7 @@ func (e *Engine) RegisterRoutes(r chi.Router) {
 }
 
 func (e *Engine) handleCapabilities(w http.ResponseWriter, r *http.Request) {
-	jsonOK(w, map[string]any{"firstCopy": "4"})
+	jsonOK(w, map[string]any{"firstCopy": "5"})
 }
 
 func clientIP(r *http.Request) string {
@@ -85,7 +86,8 @@ func (e *Engine) requirePairedPeer(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Bound receipt JSON before the request-MAC middleware buffers it.
 		if strings.HasPrefix(r.URL.Path, "/api/p2p/first-copy/receipt/") ||
-			strings.HasPrefix(r.URL.Path, "/api/p2p/first-copy/handover/prepare/") {
+			strings.HasPrefix(r.URL.Path, "/api/p2p/first-copy/handover/prepare/") ||
+			strings.HasPrefix(r.URL.Path, "/api/p2p/first-copy/handover/decision/") {
 			r.Body = http.MaxBytesReader(w, r.Body, 32768)
 		}
 		ip := clientIP(r)

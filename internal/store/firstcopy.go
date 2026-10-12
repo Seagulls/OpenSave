@@ -536,6 +536,20 @@ func (s *Store) OpenFirstCopy(gameID, txID string) error {
 	if row == nil || row.TxID != txID || row.Phase != FirstCopyActivated {
 		return fmt.Errorf("first-copy is not activated")
 	}
+	// Never bypass an in-progress, committed, or cancelled Phase C handover
+	// using the older one-sided Phase B Open endpoint.
+	var blocked int
+	if err := tx.Get(&blocked, `SELECT
+        (SELECT COUNT(*) FROM game_first_copy_handover_local WHERE game_id=?) +
+        (SELECT COUNT(*) FROM game_first_copy_handover_remote WHERE game_id=?) +
+        (SELECT COUNT(*) FROM game_first_copy_handover_decisions WHERE game_id=?) +
+        (SELECT COUNT(*) FROM game_first_copy_handover_cancelled_decisions WHERE game_id=?)`,
+		gameID, gameID, gameID, gameID); err != nil {
+		return fmt.Errorf("handover state unreadable: %w", err)
+	}
+	if blocked != 0 {
+		return fmt.Errorf("legacy first-copy Open refused: Phase C handover state exists")
+	}
 	held, err := txHeld(tx, gameID)
 	if err != nil {
 		return err
