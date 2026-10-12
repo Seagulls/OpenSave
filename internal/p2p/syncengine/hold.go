@@ -84,6 +84,16 @@ const ProvisioningUnreadableMessage = "This device could not read whether this g
 // as "not held".
 var ErrProvisioningUnreadable = errors.New("could not read whether this game is still being configured")
 
+// FirstCopyDirectionMessage is what this device says when a peer asks to
+// change, or to read, a game that is in a one-way first copy and that peer
+// is not the named reader. It must not contain "not found".
+const FirstCopyDirectionMessage = "This device is copying this game in one direction and is not accepting changes or requests from this peer"
+
+// ErrFirstCopyDirection is a local sync that would pull or fan out during a
+// source-side first copy. This device may be read by the named peer. It must
+// not fetch that peer's save.
+var ErrFirstCopyDirection = errors.New("this game is in a one-way first copy and this device will not pull or contact other peers")
+
 func isProvisioning(err error) bool {
 	return err != nil && strings.Contains(err.Error(), ProvisioningMessage)
 }

@@ -540,7 +540,7 @@ func (w *WanClient) routeRequest(ctx context.Context, msg RelayMessage) (int, an
 		return w.serveManifest(route, msg.Body, msg.From)
 
 	case strings.HasPrefix(route, "/blocks/"):
-		return w.serveBlocks(route, msg.Body)
+		return w.serveBlocks(route, msg.Body, msg.From)
 
 	case strings.HasPrefix(route, "/delete-file/"):
 		return w.serveDeleteFile(route, msg.Body, msg.From)
@@ -556,6 +556,9 @@ func (w *WanClient) routeRequest(ctx context.Context, msg RelayMessage) (int, an
 
 	case strings.HasPrefix(route, "/sync/trigger/"):
 		gameID := route[strings.LastIndex(route, "/")+1:]
+		if stop, status, msg := w.engine.peerGameAccess(gameID, msg.From, false); stop {
+			return status, map[string]string{"error": msg}
+		}
 		w.engine.GoSync(func(ctx context.Context) {
 			syncCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 			defer cancel()
@@ -607,7 +610,7 @@ func (w *WanClient) serveManifest(route string, body json.RawMessage, peerID str
 	if w.engine.holdingBack(game) {
 		return 404, map[string]string{"error": syncengine.HeldMessage}
 	}
-	if refuse, status, msg := w.engine.provisioningServeRefusal(game.ID); refuse {
+	if stop, status, msg := w.engine.peerGameAccess(game.ID, peerID, true); stop {
 		return status, map[string]string{"error": msg}
 	}
 	// As on the LAN: a save a sync here is writing is not described
@@ -636,7 +639,7 @@ func (w *WanClient) serveManifest(route string, body json.RawMessage, peerID str
 	return 200, resp
 }
 
-func (w *WanClient) serveBlocks(route string, rawBody json.RawMessage) (int, any) {
+func (w *WanClient) serveBlocks(route string, rawBody json.RawMessage, fromPeerID string) (int, any) {
 	gameID := route[strings.LastIndex(route, "/")+1:]
 	var body struct {
 		RelPath      string   `json:"relPath"`
@@ -652,7 +655,7 @@ func (w *WanClient) serveBlocks(route string, rawBody json.RawMessage) (int, any
 	if err != nil {
 		return 404, map[string]string{"error": "Game not found."}
 	}
-	if refuse, status, msg := w.engine.provisioningServeRefusal(game.ID); refuse {
+	if stop, status, msg := w.engine.peerGameAccess(game.ID, fromPeerID, true); stop {
 		return status, map[string]string{"error": msg}
 	}
 	if !delta.IsSafePath(game.SavePath, body.RelPath) {
@@ -696,7 +699,7 @@ func (w *WanClient) serveDeleteFile(route string, rawBody json.RawMessage, fromP
 	if err != nil {
 		return 404, map[string]string{"error": "Game not found."}
 	}
-	if refuse, status, msg := w.engine.provisioningServeRefusal(game.ID); refuse {
+	if stop, status, msg := w.engine.peerGameAccess(game.ID, fromPeerID, false); stop {
 		return status, map[string]string{"error": msg}
 	}
 	if !delta.IsSafePath(game.SavePath, body.RelPath) {
@@ -745,7 +748,7 @@ func (w *WanClient) serveSnapshotDownload(route string) (int, any) {
 	if err != nil {
 		return 404, map[string]string{"error": "Snapshot ZIP file not found."}
 	}
-	if refuse, status, msg := w.engine.provisioningServeRefusal(snap.GameID); refuse {
+	if stop, status, msg := w.engine.peerGameAccess(snap.GameID, "", false); stop {
 		return status, map[string]string{"error": msg}
 	}
 	archive, done, err := snapshot.OpenArchive(snap.ZipPath)

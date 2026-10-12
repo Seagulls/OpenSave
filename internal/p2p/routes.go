@@ -38,6 +38,7 @@ func (e *Engine) RegisterRoutes(r chi.Router) {
 		r.Post("/api/p2p/untrack", e.handlePeerUntrack)
 		r.Post("/api/p2p/retrack", e.handlePeerRetrack)
 		r.Get("/api/p2p/games", e.handlePeerGameList)
+		r.Get("/api/p2p/capabilities", e.handleCapabilities)
 		r.Post("/api/p2p/sync-event/{gameId}", e.handleSyncEvent)
 		r.Get("/api/p2p/app-binary", e.handleAppBinary)
 
@@ -50,6 +51,10 @@ func (e *Engine) RegisterRoutes(r chi.Router) {
 			r.Get("/api/sync/trigger/{gameId}", e.handleSyncTrigger)
 		})
 	})
+}
+
+func (e *Engine) handleCapabilities(w http.ResponseWriter, r *http.Request) {
+	jsonOK(w, map[string]any{"firstCopy": "1"})
 }
 
 func clientIP(r *http.Request) string {
@@ -692,7 +697,7 @@ func (e *Engine) handleManifest(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusNotFound, syncengine.HeldMessage)
 		return
 	}
-	if refuse, status, msg := e.provisioningServeRefusal(game.ID); refuse {
+	if stop, status, msg := e.peerGameAccess(game.ID, lanPeerID(r), true); stop {
 		jsonError(w, status, msg)
 		return
 	}
@@ -777,7 +782,7 @@ func (e *Engine) handleBlocks(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusNotFound, "Game not found.")
 		return
 	}
-	if refuse, status, msg := e.provisioningServeRefusal(game.ID); refuse {
+	if stop, status, msg := e.peerGameAccess(game.ID, lanPeerID(r), true); stop {
 		jsonError(w, status, msg)
 		return
 	}
@@ -825,7 +830,7 @@ func (e *Engine) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusNotFound, "Game not found.")
 		return
 	}
-	if refuse, status, msg := e.provisioningServeRefusal(game.ID); refuse {
+	if stop, status, msg := e.peerGameAccess(game.ID, lanPeerID(r), false); stop {
 		jsonError(w, status, msg)
 		return
 	}
@@ -988,7 +993,7 @@ func (e *Engine) peerByAddress(ip string) (syncengine.Peer, bool) {
 // newer content for us to pull.
 func (e *Engine) handleSyncTrigger(w http.ResponseWriter, r *http.Request) {
 	gameID := chi.URLParam(r, "gameId")
-	if refuse, status, msg := e.provisioningServeRefusal(gameID); refuse {
+	if stop, status, msg := e.peerGameAccess(gameID, lanPeerID(r), false); stop {
 		jsonError(w, status, msg)
 		return
 	}

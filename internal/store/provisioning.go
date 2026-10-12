@@ -170,6 +170,13 @@ func (s *Store) ReleaseProvisioningMode(gameID string, enableAutoSync bool) (boo
 	}
 	defer tx.Rollback()
 
+	var leases int
+	if err := tx.Get(&leases, `SELECT COUNT(*) FROM game_first_copies WHERE game_id = ?`, gameID); err != nil {
+		return false, fmt.Errorf("first-copy lookup %s: %w", gameID, err)
+	}
+	if leases > 0 {
+		return false, fmt.Errorf("a first-copy is still recorded for %s; abort it or activate it before releasing the hold", gameID)
+	}
 	res, err := tx.Exec(`DELETE FROM game_provisioning_holds WHERE game_id = ?`, gameID)
 	if err != nil {
 		return false, fmt.Errorf("release provisioning hold %s: %w", gameID, err)
