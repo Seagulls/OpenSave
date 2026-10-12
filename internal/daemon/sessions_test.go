@@ -101,6 +101,47 @@ func TestSessionNamesTheSnapshotAlreadyTaken(t *testing.T) {
 	}
 }
 
+// The snapshot is stored to milliseconds while session start is measured
+// to nanoseconds. When both occurred in the same millisecond, it is safe to
+// adopt the watcher's existing snapshot rather than create a duplicate.
+func TestSessionSnapshotTimestampMillisecondBoundary(t *testing.T) {
+	d := newTestDaemon(t)
+	g, dir := sessionGame(t, d, "timestamp-precision")
+	if err := os.WriteFile(filepath.Join(dir, "slot1.sav"), []byte("new checkpoint"), 0o666); err != nil {
+		t.Fatal(err)
+	}
+	snap, err := d.Snapshots.Create(g.ID, "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	game, err := d.Store.GetGame(g.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash, err := d.currentContentHash(game)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Store.SetLastManifestHash(g.ID, hash); err != nil {
+		t.Fatal(err)
+	}
+	game, err = d.Store.GetGame(g.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at, err := time.Parse(time.RFC3339Nano, snap.Timestamp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := at.Add(500 * time.Microsecond)
+	if err := d.markSessionEnd(game, hash, started, "After playing (45 min)"); err != nil {
+		t.Fatal(err)
+	}
+	if got := snapComments(t, d, g.ID); len(got) != 1 || got[0] != "After playing (45 min)" {
+		t.Fatalf("timestamp truncation created duplicate snapshot: %q", got)
+	}
+}
+
 // A session that changed nothing takes nothing; one too short to be play is
 // not recorded at all.
 func TestSessionsThatLeaveNothing(t *testing.T) {

@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -41,6 +42,7 @@ func (e *Engine) RegisterRoutes(r chi.Router) {
 		r.Get("/api/p2p/games", e.handlePeerGameList)
 		r.Get("/api/p2p/capabilities", e.handleCapabilities)
 		r.Post("/api/p2p/sync-event/{gameId}", e.handleSyncEvent)
+		r.Post("/api/p2p/first-copy/receipt/{gameId}", e.handleFirstCopyRemoteReceipt)
 		r.Get("/api/p2p/app-binary", e.handleAppBinary)
 
 		// What moves save data, or starts a sync: refused while paused.
@@ -55,7 +57,7 @@ func (e *Engine) RegisterRoutes(r chi.Router) {
 }
 
 func (e *Engine) handleCapabilities(w http.ResponseWriter, r *http.Request) {
-	jsonOK(w, map[string]any{"firstCopy": "2"})
+	jsonOK(w, map[string]any{"firstCopy": "3"})
 }
 
 func clientIP(r *http.Request) string {
@@ -80,6 +82,10 @@ const unsignedRefusal = "Unauthorized: this request was not signed with the key 
 // (matching the JS guard's side effects).
 func (e *Engine) requirePairedPeer(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Bound receipt JSON before the request-MAC middleware buffers it.
+		if strings.HasPrefix(r.URL.Path, "/api/p2p/first-copy/receipt/") {
+			r.Body = http.MaxBytesReader(w, r.Body, 32768)
+		}
 		ip := clientIP(r)
 		if isLoopbackIP(ip) {
 			// The dashboard and the CLI, which do not sign — and, on one
@@ -90,7 +96,8 @@ func (e *Engine) requirePairedPeer(next http.Handler) http.Handler {
 			// fails is not refused here, as nothing on loopback ever was; it
 			// just identifies nobody.
 			if id, _, ok := e.verifyLANRequest(r); ok && id != "" {
-				r = r.WithContext(context.WithValue(r.Context(), lanPeerKey{}, id))
+				ctx := context.WithValue(r.Context(), lanPeerKey{}, id)
+				r = r.WithContext(context.WithValue(ctx, lanSignedPeerKey{}, id))
 			}
 			next.ServeHTTP(w, r)
 			return
@@ -196,7 +203,11 @@ func (e *Engine) requirePairedPeer(next http.Handler) http.Handler {
 		// The identity this request was matched to — proven where the peer
 		// signs, address-matched where it cannot yet. Handlers that act on a
 		// peer's behalf act on this, never on an ID in the body.
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), lanPeerKey{}, matched.ID)))
+		ctx := context.WithValue(r.Context(), lanPeerKey{}, matched.ID)
+		if provenID != "" {
+			ctx = context.WithValue(ctx, lanSignedPeerKey{}, provenID)
+		}
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 

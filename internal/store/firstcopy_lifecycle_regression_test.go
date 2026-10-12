@@ -53,15 +53,17 @@ func TestFirstCopyActivatedFenceRejectsAbortAndFinish(t *testing.T) {
 	if err := s.OpenFirstCopy(id, "wrong"); err == nil {
 		t.Fatal("wrong tx opened an activated fence")
 	}
-	if err := s.RecordFirstCopyReceipt(id, row.TxID, row.PeerID, row.GenerationID, row.ContentHash); err != nil {
-		t.Fatal(err)
+	// Phase B disables the locally writable Phase A receipt table. A forged
+	// local acknowledgement must not remove the activated direction fence.
+	if err := s.RecordFirstCopyReceipt(id, row.TxID, row.PeerID, row.GenerationID, row.ContentHash); err == nil {
+		t.Fatal("unauthenticated legacy receipt was accepted")
 	}
-	if err := s.OpenFirstCopy(id, row.TxID); err != nil {
-		t.Fatal(err)
+	if err := s.OpenFirstCopy(id, row.TxID); err == nil {
+		t.Fatal("Open accepted an unauthenticated legacy receipt")
 	}
 	lease, err = s.BoundFirstCopy(id)
-	if err != nil || lease != nil {
-		t.Fatalf("open did not release the fence: %+v %v", lease, err)
+	if err != nil || lease == nil || lease.Phase != FirstCopyActivated {
+		t.Fatalf("unauthenticated receipt removed the fence: %+v %v", lease, err)
 	}
 }
 
@@ -156,14 +158,17 @@ func TestFirstCopyGameDeletePreservesFenceUntilExplicitOpen(t *testing.T) {
 	if err := s.RemoveGameRoot(id, "firstcopy-root"); err == nil {
 		t.Fatal("root removal changed activated save set")
 	}
-	if err := s.RecordFirstCopyReceipt(id, row.TxID, row.PeerID, row.GenerationID, row.ContentHash); err != nil {
-		t.Fatal(err)
+	// Local legacy receipts must not let game deletion cascade away an
+	// activated fence. The successful authenticated Open/Delete lifecycle
+	// is covered in TestFirstCopy_PhaseBAuthenticatedReceiptExchange.
+	if err := s.RecordFirstCopyReceipt(id, row.TxID, row.PeerID, row.GenerationID, row.ContentHash); err == nil {
+		t.Fatal("unauthenticated legacy receipt was accepted")
 	}
-	if err := s.OpenFirstCopy(id, row.TxID); err != nil {
-		t.Fatal(err)
+	if err := s.OpenFirstCopy(id, row.TxID); err == nil {
+		t.Fatal("Open accepted an unauthenticated legacy receipt")
 	}
-	if err := s.DeleteGame(id); err != nil {
-		t.Fatalf("ordinary DeleteGame after open changed: %v", err)
+	if err := s.DeleteGame(id); err == nil {
+		t.Fatal("legacy receipt bypassed activated game deletion fence")
 	}
 }
 

@@ -68,5 +68,12 @@ func (e *Engine) preflightFirstCopyTarget(ctx context.Context, gameID string, ga
 			return fmt.Errorf("first-copy preflight %q: %w", name, err)
 		}
 	}
+	// Persist the exact immutable source transaction before any block write.
+	// A later retry, forged manifest, or mixed-version peer cannot silently
+	// substitute a different generation under the same target lease.
+	if err := e.Store.BindFirstCopyTargetGeneration(gameID, lease.TxID, peer.ID,
+		remote.FirstCopy.TxID, remote.FirstCopy.ID, remote.FirstCopy.Branch); err != nil {
+		return fmt.Errorf("first-copy source-generation bind refused: %w", err)
+	}
 	return nil
 }

@@ -367,6 +367,7 @@ func (w *WanClient) routeRequest(ctx context.Context, msg RelayMessage) (int, an
 		strings.HasPrefix(route, "/snapshot/") ||
 		strings.HasPrefix(route, "/sync/trigger/") ||
 		strings.HasPrefix(route, "/delete-file/") ||
+		strings.HasPrefix(route, "/first-copy/receipt/") ||
 		route == "/games" ||
 		route == "/unpair" ||
 		route == "/untrack" ||
@@ -535,6 +536,20 @@ func (w *WanClient) routeRequest(ctx context.Context, msg RelayMessage) (int, an
 			return 503, map[string]string{"error": syncengine.ProvisioningUnreadableMessage}
 		}
 		return 200, list
+
+	case strings.HasPrefix(route, "/first-copy/receipt/"):
+		if msg.Method != "POST" || len(msg.Body) > 32768 {
+			return 400, map[string]string{"error": "invalid receipt method or size"}
+		}
+		var receipt store.FirstCopyReceipt
+		if err := json.Unmarshal(msg.Body, &receipt); err != nil {
+			return 400, map[string]string{"error": "malformed receipt"}
+		}
+		gameID := strings.TrimPrefix(route, "/first-copy/receipt/")
+		if err := w.engine.acceptFirstCopyReceipt(gameID, msg.From, msg.Nonce, receipt); err != nil {
+			return 409, map[string]string{"error": err.Error()}
+		}
+		return 200, map[string]any{"accepted": true, "opened": false, "autoSync": false}
 
 	case strings.HasPrefix(route, "/manifest/"):
 		return w.serveManifest(route, msg.Body, msg.From)

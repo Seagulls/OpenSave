@@ -26,16 +26,19 @@ const (
 // both keep the hold. Activate atomically releases the hold but RETAINS the
 // named-peer lease as an activated direction fence until explicit Open.
 type FirstCopy struct {
-	GameID           string `db:"game_id" json:"gameId"`
-	TxID             string `db:"tx_id" json:"txId"`
-	Role             string `db:"role" json:"role"`
-	PeerID           string `db:"peer_id" json:"peerId"`
-	Phase            string `db:"phase" json:"phase"`
-	ContentHash      string `db:"content_hash" json:"contentHash"`
-	GenerationID     string `db:"generation_id" json:"generationId"`
-	GenerationBranch string `db:"generation_branch" json:"generationBranch"`
-	CreatedAt        string `db:"created_at" json:"createdAt"`
-	ExpiresAt        string `db:"expires_at" json:"expiresAt"`
+	GameID                 string `db:"game_id" json:"gameId"`
+	TxID                   string `db:"tx_id" json:"txId"`
+	Role                   string `db:"role" json:"role"`
+	PeerID                 string `db:"peer_id" json:"peerId"`
+	Phase                  string `db:"phase" json:"phase"`
+	ContentHash            string `db:"content_hash" json:"contentHash"`
+	GenerationID           string `db:"generation_id" json:"generationId"`
+	GenerationBranch       string `db:"generation_branch" json:"generationBranch"`
+	SourceTxID             string `db:"source_tx_id" json:"sourceTxId"`
+	SourceGenerationID     string `db:"source_generation_id" json:"sourceGenerationId"`
+	SourceGenerationBranch string `db:"source_generation_branch" json:"sourceGenerationBranch"`
+	CreatedAt              string `db:"created_at" json:"createdAt"`
+	ExpiresAt              string `db:"expires_at" json:"expiresAt"`
 }
 
 func (f FirstCopy) expired(now time.Time) bool {
@@ -49,7 +52,7 @@ type rowQuery interface {
 
 func (s *Store) readFirstCopy(q rowQuery, gameID string) (*FirstCopy, error) {
 	var row FirstCopy
-	err := q.Get(&row, `SELECT game_id, tx_id, role, peer_id, phase, content_hash, generation_id, generation_branch, created_at, expires_at FROM game_first_copies WHERE game_id = ?`, gameID)
+	err := q.Get(&row, `SELECT game_id, tx_id, role, peer_id, phase, content_hash, generation_id, generation_branch, source_tx_id, source_generation_id, source_generation_branch, created_at, expires_at FROM game_first_copies WHERE game_id = ?`, gameID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -358,14 +361,11 @@ func (s *Store) BeginFirstCopySource(gameID, peerID string, ttl time.Duration, s
 
 // RecordFirstCopyReceipt stores a named peer's acknowledgement of one generation.
 // A different peer, transaction, or digest does not overwrite a matching row.
+// RecordFirstCopyReceipt is the unsafe Phase A local receipt API. A local
+// caller cannot attest to another peer. Keep the signature for compatibility,
+// but refuse every write. Only a signed peer can record Phase B evidence.
 func (s *Store) RecordFirstCopyReceipt(gameID, txID, peerID, generationID, digest string) error {
-	if gameID == "" || txID == "" || peerID == "" || digest == "" {
-		return fmt.Errorf("first-copy receipt is incomplete")
-	}
-	_, err := s.db.Exec(`INSERT INTO game_first_copy_receipts (game_id, tx_id, peer_id, generation_id, digest) VALUES (?, ?, ?, ?, ?)
-		ON CONFLICT(game_id, tx_id, peer_id) DO UPDATE SET generation_id = excluded.generation_id, digest = excluded.digest`,
-		gameID, txID, peerID, generationID, digest)
-	return err
+	return fmt.Errorf("legacy first-copy receipts are disabled; use authenticated peer receipts")
 }
 
 func txHeld(tx rowQuery, gameID string) (bool, error) {
@@ -543,13 +543,34 @@ func (s *Store) OpenFirstCopy(gameID, txID string) error {
 	if held {
 		return fmt.Errorf("first-copy open refused: provisioning hold unexpectedly remains")
 	}
-	var receipts int
-	if err := tx.Get(&receipts, `SELECT COUNT(*) FROM game_first_copy_receipts WHERE game_id = ? AND tx_id = ? AND peer_id = ? AND generation_id = ? AND digest = ?`,
-		gameID, txID, row.PeerID, row.GenerationID, row.ContentHash); err != nil {
-		return err
+	// Phase A's game_first_copy_receipts table is unauthenticated and must
+	// NEVER authorize Open. Require an immutable signed receipt from the
+	// complementary peer, naming BOTH transactions and the exact generation.
+	var sourceTx, targetTx, generationID, branch, remoteRole string
+	if row.Role == FirstCopySource {
+		sourceTx, generationID, branch, remoteRole = row.TxID, row.GenerationID, row.GenerationBranch, FirstCopyTarget
+	} else {
+		sourceTx, targetTx, generationID, branch, remoteRole = row.SourceTxID, row.TxID, row.SourceGenerationID, row.SourceGenerationBranch, FirstCopySource
 	}
-	if receipts != 1 {
-		return fmt.Errorf("first-copy open refused: named peer has not acknowledged this generation")
+	if sourceTx == "" || generationID == "" || branch == "" {
+		return fmt.Errorf("first-copy open refused: source generation binding incomplete")
+	}
+	var receivedAt string
+	if err := tx.Get(&receivedAt, `SELECT received_at FROM game_first_copy_remote_receipts
+		WHERE game_id = ? AND local_tx_id = ? AND peer_id = ?
+		AND source_tx_id = ? AND generation_id = ? AND branch = ?
+		AND digest = ? AND role = ? AND phase = ? AND target_tx_id != ''
+		AND (? = '' OR target_tx_id = ?)`,
+		gameID, txID, row.PeerID, sourceTx, generationID, branch,
+		row.ContentHash, remoteRole, FirstCopyActivated, targetTx, targetTx); err != nil {
+		return fmt.Errorf("first-copy open refused: matching authenticated receipt not found: %w", err)
+	}
+	// A recorded receipt is a point-in-time remote attestation, not proof that
+	// an offline peer remained unchanged forever. Require fresh signed peer
+	// readiness immediately before a separately authorized explicit Open.
+	stamp, err := time.Parse(time.RFC3339Nano, receivedAt)
+	if err != nil || time.Since(stamp) > 2*time.Minute || time.Until(stamp) > 5*time.Second {
+		return fmt.Errorf("first-copy open refused: remote receipt is stale or invalid")
 	}
 	res, err := tx.Exec(`DELETE FROM game_first_copies WHERE game_id = ? AND tx_id = ? AND phase = ?`, gameID, txID, FirstCopyActivated)
 	if err != nil {

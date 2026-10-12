@@ -70,9 +70,14 @@ the existing hold refusal. Do not release the hold to compensate.
 fence has been removed. **Local digest comparison is not remote attestation.**
 The caller must separately prove both devices are activated,
 with matching current full-root digests and intended peer identities, and
-obtain explicit permission before opening either side. This PR does not
-implement distributed handover or authenticated completion receipts. It is
-NOT approved for hardware testing. Do not automatically
+obtain explicit permission before opening either side. Phase A did not implement authenticated completion receipts. The stacked
+Phase B prototype adds paired-key authenticated two-way activated receipts,
+bound to both local transactions, the pinned generation, the branch and the
+full-root digest. Both peers retain their fences; signed receipts DO NOT
+release holds, automatically Open, or enable AutoSync. A local Open now
+requires a fresh matching authenticated peer receipt, but distributed Open
+is still not atomic and must be separately orchestrated and authorized.
+The combined protocol is NOT approved for hardware testing. Do not automatically
 invoke `Open` from an activation retry or timeout.
 
 A count of paired devices is not an authorization rule. A target with
@@ -123,5 +128,6 @@ ordinary sync.
 ## Not in this change
 
 No second sync engine, no peer-targeted ordinary sync, no version vectors,
-no authenticated remote completion receipt, and no automatic enablement of
-bidirectional AutoSync.
+no automatic distributed Open and no automatic enablement of bidirectional
+AutoSync. Phase B adds an authenticated remote receipt but not distributed
+commit or remote filesystem measurement.
