@@ -1,10 +1,14 @@
 package e2e
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"testing"
 	"time"
 
+	"github.com/opensave/opensave/internal/delta"
+	"github.com/opensave/opensave/internal/p2p/syncengine"
 	"github.com/opensave/opensave/internal/store"
 	"github.com/opensave/opensave/testutil"
 )
@@ -147,6 +151,19 @@ func TestFirstCopy_PhaseC3GuardedFinalization(t *testing.T) {
 					t.Fatalf("finalize intent %d", rc)
 				}
 			}
+			for _, operator := range []struct {
+				node *testutil.TestDaemon
+				tx   string
+			}{{source, a.TxID}, {target, b.TxID}} {
+				var light store.FirstCopyFinalizationStatus
+				if rc := operator.node.APIStatus(http.MethodGet, "/api/games/"+gameID+"/first-copy/handover/finalize?verifyContent=0", nil, &light); rc != 200 || light.ContentChecked || light.ContentValid || !light.FenceActive || light.OpenAuthorized {
+					t.Fatalf("lightweight poll claimed content verification: rc=%d %+v", rc, light)
+				}
+				var full store.FirstCopyFinalizationStatus
+				if rc := operator.node.APIStatus(http.MethodGet, "/api/games/"+gameID+"/first-copy/handover/finalize", nil, &full); rc != 200 || !full.ContentChecked || !full.ContentValid || !full.FenceActive || full.OpenAuthorized {
+					t.Fatalf("default poll changed safety semantics: rc=%d %+v", rc, full)
+				}
+			}
 			// Source/target/third are all paired with a signed transport,
 			// but the durable admission guard allows no third-peer bytes.
 			if rc := third.APIStatus(http.MethodPost, "/api/games/"+gameID+"/release-provisioning",
@@ -155,6 +172,38 @@ func TestFirstCopy_PhaseC3GuardedFinalization(t *testing.T) {
 			}
 			verifyThird := func(where string) {
 				t.Helper()
+				paired, err := third.Daemon.Store.GetPeer(source.NodeID())
+				if err != nil {
+					t.Fatal(err)
+				}
+				counterpart := syncengine.Peer{ID: paired.ID, Name: paired.Name, Address: paired.Address, Port: paired.Port}
+				ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+				defer cancel()
+				transport := third.Daemon.P2P.Sync.Transport
+				manifest, manifestErr := transport.FetchManifest(ctx, counterpart, gameID, syncengine.ManifestQuery{Name: "Decision", SavePath: thirdDir})
+				if manifestErr == nil {
+					t.Fatalf("signed third peer read manifest during %s: %+v", where, manifest)
+				}
+				if errors.Is(manifestErr, context.DeadlineExceeded) || errors.Is(manifestErr, context.Canceled) {
+					t.Fatalf("third peer manifest probe timed out at %s, refusal not proven: %v", where, manifestErr)
+				}
+				generation := &syncengine.FirstCopyGeneration{Protocol: syncengine.FirstCopyGenerationProtocol,
+					TxID: a.TxID, ID: srcRow.GenerationID, Digest: srcRow.ContentHash, Branch: srcRow.GenerationBranch}
+				ref := syncengine.FileRef{GameID: gameID, RelPath: "slot.sav", Generation: generation}
+				blocks, blockErr := transport.FetchBlocks(ctx, counterpart, ref, []int{0}, delta.BlockSizeFor(int64(len("DECISION-IMMUTABLE"))))
+				if blockErr == nil || len(blocks) != 0 {
+					t.Fatalf("signed third peer received protected block during %s: blocks=%d err=%v", where, len(blocks), blockErr)
+				}
+				if errors.Is(blockErr, context.DeadlineExceeded) || errors.Is(blockErr, context.Canceled) {
+					t.Fatalf("third peer block probe timed out at %s, refusal not proven: %v", where, blockErr)
+				}
+				deleteErr := transport.DeleteRemote(ctx, counterpart, ref)
+				if deleteErr == nil {
+					t.Fatalf("signed third peer deleted protected source during %s", where)
+				}
+				if errors.Is(deleteErr, context.DeadlineExceeded) || errors.Is(deleteErr, context.Canceled) {
+					t.Fatalf("third peer delete probe timed out at %s, refusal not proven: %v", where, deleteErr)
+				}
 				rc := third.APIStatus(http.MethodPost, "/api/games/"+gameID+"/sync", nil, nil)
 				if rc >= 500 {
 					t.Fatalf("third sync at %s failed rc=%d", where, rc)

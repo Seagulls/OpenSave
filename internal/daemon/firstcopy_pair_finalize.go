@@ -38,9 +38,20 @@ func (d *Daemon) SendFirstCopyPairFinalization(ctx context.Context, gameID, txID
 // Status remains inspectable even after a local save mutation, timeout,
 // pause, or transport outage. A red status is never permission to Open.
 func (d *Daemon) ReadFirstCopyPairFinalization(gameID, txID string) (store.FirstCopyFinalizationStatus, error) {
+	return d.ReadFirstCopyPairFinalizationStatus(gameID, txID, true)
+}
+
+// Lightweight journal reads do NOT claim that the current live save matches.
+// The existing full preflight remains mandatory for every permission-changing
+// operator action and for default status requests.
+func (d *Daemon) ReadFirstCopyPairFinalizationStatus(gameID, txID string, verifyContent bool) (store.FirstCopyFinalizationStatus, error) {
 	status, err := d.Store.ReadFirstCopyPairFinalization(gameID, txID)
 	if err != nil {
 		return status, err
+	}
+	status.ContentChecked = verifyContent
+	if !verifyContent {
+		return status, nil
 	}
 	if err := d.handoverPreflight(gameID, txID); err != nil {
 		status.ContentValid = false

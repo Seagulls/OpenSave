@@ -290,6 +290,17 @@ func ReadGenerationBlocks(zipPath, root, rel string, indices []int, blockSize in
 		wanted[index] = pos
 	}
 	out := make([]delta.BlockSource, len(indices))
+	lastRequested := -1
+	for index := range wanted {
+		if index > lastRequested {
+			lastRequested = index
+		}
+	}
+	// sourceGeneration certified the full ZIP and every returned block is
+	// hash-checked. No later block needs to be decompressed for this batch.
+	if lastRequested < 0 {
+		return out, nil
+	}
 	rc, err := found.Open()
 	if err != nil {
 		return nil, err
@@ -297,6 +308,9 @@ func ReadGenerationBlocks(zipPath, root, rel string, indices []int, blockSize in
 	defer rc.Close()
 	buf := make([]byte, blockSize)
 	for index, block := range expected.Blocks {
+		if index > lastRequested {
+			break
+		}
 		n, readErr := io.ReadFull(rc, buf[:block.Length])
 		if readErr != nil && readErr != io.EOF && readErr != io.ErrUnexpectedEOF {
 			return nil, readErr

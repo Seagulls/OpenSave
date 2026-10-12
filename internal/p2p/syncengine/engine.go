@@ -254,21 +254,14 @@ func (e *Engine) SyncGame(ctx context.Context, gameID string, onlinePeers []Peer
 	}
 	// A game still being configured does not sync, whichever caller got
 	// here: a watch, a retry, a peer trigger, or a sync asked for by hand.
-	held, holdErr := e.provisioningHeld(gameID)
-	if holdErr != nil {
-		return nil, fmt.Errorf("%w: %v", ErrProvisioningUnreadable, holdErr)
+	access, accessErr := e.Store.PeerTransferAccess(gameID)
+	if accessErr != nil {
+		return nil, fmt.Errorf("%w: %v", ErrProvisioningUnreadable, accessErr)
 	}
-	guard, guardErr := e.Store.PairGuardForServe(gameID)
-	if guardErr != nil {
-		return nil, fmt.Errorf("%w: %v", ErrProvisioningUnreadable, guardErr)
-	}
-	if guard != nil {
+	if access.Guard != nil {
 		return nil, ErrFirstCopyDirection
 	}
-	lease, leaseErr := e.Store.BoundFirstCopy(gameID)
-	if leaseErr != nil {
-		return nil, fmt.Errorf("%w: %v", ErrProvisioningUnreadable, leaseErr)
-	}
+	held, lease := access.Held, access.Lease
 	if lease != nil && lease.Role == store.FirstCopySource {
 		return nil, ErrFirstCopyDirection
 	}

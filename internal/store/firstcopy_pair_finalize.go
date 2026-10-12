@@ -60,6 +60,7 @@ type FirstCopyPairGuard struct {
 
 type FirstCopyFinalizationStatus struct {
 	ContentValid      bool   `json:"contentValid"`
+	ContentChecked    bool   `json:"contentChecked"`
 	GameID            string `json:"gameId"`
 	TxID              string `json:"txId"`
 	DecisionID        string `json:"decisionId"`
@@ -118,11 +119,8 @@ func (s *Store) PairGuardForServe(gameID string) (*FirstCopyPairGuard, error) {
 	if err != nil || g == nil {
 		return g, err
 	}
-	if g.PeerID == "" || g.DecisionID == "" || g.Digest == "" || g.GameID != gameID ||
-		(g.Role != FirstCopySource && g.Role != FirstCopyTarget) ||
-		(g.Phase != FinalizeIntent && g.Phase != FinalizeOffered && g.Phase != FinalizeReadyPhase &&
-			g.Phase != FinalizePairFinalized && g.Phase != FinalizeCancelled) {
-		return nil, fmt.Errorf("invalid durable pair guard; refusing access")
+	if err := validatePeerAccessGuard(g, gameID); err != nil {
+		return nil, err
 	}
 	return g, nil
 }

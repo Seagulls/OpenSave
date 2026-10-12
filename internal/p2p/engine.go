@@ -689,22 +689,17 @@ func (e *Engine) firstCopyTarget(gameID string) (string, bool, error) {
 // allowHeldRead is the only exception to a provisioning hold: the named peer
 // may read a source. block is set for every other request, including an
 // unsigned one. No lease leaves both false.
-func (e *Engine) firstCopyServe(gameID, requester string, read bool) (allowHeldRead bool, block bool, status int, msg string) {
-	// Phase C.3 independent durable guard is checked BEFORE the legacy lease.
-	// Never interpret a DB failure as permission to serve ordinarily.
-	pair, pairErr := e.Store.PairGuardForServe(gameID)
-	if pairErr != nil {
-		return false, true, http.StatusServiceUnavailable, syncengine.ProvisioningUnreadableMessage
-	}
-	if pair != nil {
-		// A vetoed finalization is quarantined even from its named peer.
+// firstCopyServeState keeps the existing direction/peer semantics without
+// looking up the same game's restrictions independently several times.
+func firstCopyServeState(access store.PeerAccessState, requester string, read bool) (allowHeldRead bool, block bool, status int, msg string) {
+	if pair := access.Guard; pair != nil {
 		if pair.Phase == store.FinalizeCancelled {
 			return false, true, http.StatusConflict, syncengine.FirstCopyDirectionMessage
 		}
-		lease, err := e.Store.BoundFirstCopy(gameID)
-		if err != nil || lease == nil || lease.TxID != pair.LocalTxID ||
-			lease.PeerID != pair.PeerID || lease.Role != pair.Role ||
-			lease.Phase != store.FirstCopyActivated || lease.ContentHash != pair.Digest {
+		lease := access.Lease
+		if lease == nil || lease.TxID != pair.LocalTxID || lease.PeerID != pair.PeerID ||
+			lease.Role != pair.Role || lease.Phase != store.FirstCopyActivated ||
+			lease.ContentHash != pair.Digest {
 			return false, true, http.StatusServiceUnavailable, syncengine.ProvisioningUnreadableMessage
 		}
 		if read && pair.Role == store.FirstCopySource && requester != "" && requester == pair.PeerID {
@@ -712,10 +707,7 @@ func (e *Engine) firstCopyServe(gameID, requester string, read bool) (allowHeldR
 		}
 		return false, true, http.StatusConflict, syncengine.FirstCopyDirectionMessage
 	}
-	lease, err := e.Store.BoundFirstCopy(gameID)
-	if err != nil {
-		return false, true, http.StatusServiceUnavailable, syncengine.ProvisioningUnreadableMessage
-	}
+	lease := access.Lease
 	if lease == nil {
 		return false, false, 0, ""
 	}
@@ -723,11 +715,7 @@ func (e *Engine) firstCopyServe(gameID, requester string, read bool) (allowHeldR
 		if lease.Phase == store.FirstCopyActivated {
 			return true, false, 0, ""
 		}
-		held, err := e.provisioningHeld(gameID)
-		if err != nil {
-			return false, true, http.StatusServiceUnavailable, syncengine.ProvisioningUnreadableMessage
-		}
-		if !held {
+		if !access.Held {
 			return false, true, http.StatusConflict, syncengine.FirstCopyDirectionMessage
 		}
 		return true, false, 0, ""
@@ -735,13 +723,27 @@ func (e *Engine) firstCopyServe(gameID, requester string, read bool) (allowHeldR
 	return false, true, http.StatusConflict, syncengine.FirstCopyDirectionMessage
 }
 
+// Kept for existing internal callers/tests. The live peer path below reads
+// only one access snapshot per request.
+func (e *Engine) firstCopyServe(gameID, requester string, read bool) (allowHeldRead bool, block bool, status int, msg string) {
+	access, err := e.Store.PeerTransferAccess(gameID)
+	if err != nil {
+		return false, true, http.StatusServiceUnavailable, syncengine.ProvisioningUnreadableMessage
+	}
+	return firstCopyServeState(access, requester, read)
+}
+
 func (e *Engine) peerGameAccess(gameID, requester string, read bool) (stop bool, status int, msg string) {
-	allow, block, status, msg := e.firstCopyServe(gameID, requester, read)
+	access, err := e.Store.PeerTransferAccess(gameID)
+	if err != nil {
+		return true, http.StatusServiceUnavailable, syncengine.ProvisioningUnreadableMessage
+	}
+	allow, block, status, msg := firstCopyServeState(access, requester, read)
 	if block {
 		return true, status, msg
 	}
-	if refuse, status, msg := e.provisioningServeRefusal(gameID); refuse && !allow {
-		return true, status, msg
+	if access.Held && !allow {
+		return true, http.StatusConflict, syncengine.ProvisioningMessage
 	}
 	return false, 0, ""
 }

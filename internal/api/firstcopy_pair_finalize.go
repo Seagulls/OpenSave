@@ -51,7 +51,12 @@ func (s *Server) handleReadFirstCopyPairFinalize(w http.ResponseWriter, r *http.
 		writeError(w, http.StatusNotFound, "first-copy transaction not found")
 		return
 	}
-	status, err := s.Daemon.ReadFirstCopyPairFinalization(gameID, lease.TxID)
+	verification := r.URL.Query().Get("verifyContent")
+	if verification != "" && verification != "0" && verification != "1" {
+		writeError(w, http.StatusBadRequest, "verifyContent must be 0 or 1")
+		return
+	}
+	status, err := s.Daemon.ReadFirstCopyPairFinalizationStatus(gameID, lease.TxID, verification != "0")
 	if err != nil {
 		writeError(w, http.StatusConflict, err.Error())
 		return
