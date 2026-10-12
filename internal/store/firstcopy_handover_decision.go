@@ -154,6 +154,9 @@ func (s *Store) OfferFirstCopyDecision(gameID, txID string) (FirstCopyDecisionMe
 	if err != nil {
 		return FirstCopyDecisionMessage{}, err
 	}
+	if err := s.verifyDecisionEvidenceInTransaction(tx, gameID, lease, p, time.Now().UTC()); err != nil {
+		return FirstCopyDecisionMessage{}, err
+	}
 	if existing != nil {
 		if !decisionMatches(existing, p, lease, existing.DecisionID) {
 			return FirstCopyDecisionMessage{}, fmt.Errorf("conflicting existing decision")
@@ -196,6 +199,9 @@ func (s *Store) AuthorizeFirstCopyDecision(gameID, txID, id string) error {
 	if err != nil {
 		return err
 	}
+	if err := s.verifyDecisionEvidenceInTransaction(tx, gameID, lease, p, time.Now().UTC()); err != nil {
+		return err
+	}
 	if !decisionMatches(row, p, lease, id) {
 		return fmt.Errorf("decision identity does not match")
 	}
@@ -231,6 +237,11 @@ func (s *Store) AcceptFirstCopyDecision(gameID, peer, nonce string, m FirstCopyD
 		return fmt.Errorf("no first-copy transaction: %w", err)
 	}
 	p, lease, err := s.decisionBasis(gameID, lease.TxID)
+	// Already committed C.2 state is durable recovery evidence; after
+	// readiness expires only its identical signed commit/confirm can retry.
+	if err != nil && (m.Stage == DecisionCommit || m.Stage == DecisionConfirm) {
+		p, lease, err = s.committedDecisionBasis(gameID, lease.TxID)
+	}
 	if err != nil {
 		return err
 	}
@@ -263,6 +274,12 @@ func (s *Store) AcceptFirstCopyDecision(gameID, peer, nonce string, m FirstCopyD
 	row, err := s.readDecision(tx, gameID)
 	if err != nil {
 		return err
+	}
+	if row == nil || row.Phase != DecisionCommitted ||
+		(m.Stage != DecisionCommit && m.Stage != DecisionConfirm) {
+		if err := s.verifyDecisionEvidenceInTransaction(tx, gameID, lease, p, time.Now().UTC()); err != nil {
+			return err
+		}
 	}
 	if row != nil && !decisionMatches(row, p, lease, m.DecisionID) {
 		return fmt.Errorf("different handover decision already recorded")
@@ -320,6 +337,9 @@ func (s *Store) AcceptFirstCopyDecision(gameID, peer, nonce string, m FirstCopyD
 // evidence; caller must validate current digest, pause and active sync.
 func (s *Store) OutboundFirstCopyDecision(gameID, txID, stage string) (FirstCopyDecisionMessage, string, error) {
 	p, lease, err := s.decisionBasis(gameID, txID)
+	if err != nil && (stage == DecisionCommit || stage == DecisionConfirm) {
+		p, lease, err = s.committedDecisionBasis(gameID, txID)
+	}
 	if err != nil {
 		return FirstCopyDecisionMessage{}, "", err
 	}

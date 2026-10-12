@@ -370,6 +370,7 @@ func (w *WanClient) routeRequest(ctx context.Context, msg RelayMessage) (int, an
 		strings.HasPrefix(route, "/first-copy/receipt/") ||
 		strings.HasPrefix(route, "/first-copy/handover/prepare/") ||
 		strings.HasPrefix(route, "/first-copy/handover/decision/") ||
+		strings.HasPrefix(route, "/first-copy/handover/finalize/") ||
 		route == "/games" ||
 		route == "/unpair" ||
 		route == "/untrack" ||
@@ -580,6 +581,20 @@ func (w *WanClient) routeRequest(ctx context.Context, msg RelayMessage) (int, an
 			return 409, map[string]string{"error": err.Error()}
 		}
 		return 200, map[string]any{"accepted": true, "opened": false, "autoSync": false, "fenceActive": true}
+
+	case strings.HasPrefix(route, "/first-copy/handover/finalize/"):
+		if msg.Method != "POST" || len(msg.Body) > 32768 {
+			return 400, map[string]string{"error": "invalid finalization method/size"}
+		}
+		var finish store.FirstCopyFinalizeMessage
+		if err := json.Unmarshal(msg.Body, &finish); err != nil {
+			return 400, map[string]string{"error": "malformed finalization"}
+		}
+		gameID := strings.TrimPrefix(route, "/first-copy/handover/finalize/")
+		if err := w.engine.acceptFirstCopyFinalize(gameID, msg.From, msg.Nonce, finish); err != nil {
+			return 409, map[string]string{"error": err.Error()}
+		}
+		return 200, map[string]any{"accepted": true, "fenceActive": true, "openAuthorized": false, "autoSync": false}
 
 	case strings.HasPrefix(route, "/manifest/"):
 		return w.serveManifest(route, msg.Body, msg.From)

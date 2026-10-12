@@ -550,6 +550,14 @@ func (s *Store) OpenFirstCopy(gameID, txID string) error {
 	if blocked != 0 {
 		return fmt.Errorf("legacy first-copy Open refused: Phase C handover state exists")
 	}
+	var pairGuardCount int
+	if err := tx.Get(&pairGuardCount, `SELECT COUNT(*) FROM game_first_copy_pair_guards WHERE game_id=?`, gameID); err != nil {
+		return fmt.Errorf("pair guard unreadable: %w", err)
+	}
+	if pairGuardCount != 0 {
+		return fmt.Errorf("pair-only guard requires separate future third-peer admission")
+	}
+
 	held, err := txHeld(tx, gameID)
 	if err != nil {
 		return err

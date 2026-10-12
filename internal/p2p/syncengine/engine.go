@@ -258,6 +258,13 @@ func (e *Engine) SyncGame(ctx context.Context, gameID string, onlinePeers []Peer
 	if holdErr != nil {
 		return nil, fmt.Errorf("%w: %v", ErrProvisioningUnreadable, holdErr)
 	}
+	guard, guardErr := e.Store.PairGuardForServe(gameID)
+	if guardErr != nil {
+		return nil, fmt.Errorf("%w: %v", ErrProvisioningUnreadable, guardErr)
+	}
+	if guard != nil {
+		return nil, ErrFirstCopyDirection
+	}
 	lease, leaseErr := e.Store.BoundFirstCopy(gameID)
 	if leaseErr != nil {
 		return nil, fmt.Errorf("%w: %v", ErrProvisioningUnreadable, leaseErr)

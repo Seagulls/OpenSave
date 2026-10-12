@@ -690,6 +690,28 @@ func (e *Engine) firstCopyTarget(gameID string) (string, bool, error) {
 // may read a source. block is set for every other request, including an
 // unsigned one. No lease leaves both false.
 func (e *Engine) firstCopyServe(gameID, requester string, read bool) (allowHeldRead bool, block bool, status int, msg string) {
+	// Phase C.3 independent durable guard is checked BEFORE the legacy lease.
+	// Never interpret a DB failure as permission to serve ordinarily.
+	pair, pairErr := e.Store.PairGuardForServe(gameID)
+	if pairErr != nil {
+		return false, true, http.StatusServiceUnavailable, syncengine.ProvisioningUnreadableMessage
+	}
+	if pair != nil {
+		// A vetoed finalization is quarantined even from its named peer.
+		if pair.Phase == store.FinalizeCancelled {
+			return false, true, http.StatusConflict, syncengine.FirstCopyDirectionMessage
+		}
+		lease, err := e.Store.BoundFirstCopy(gameID)
+		if err != nil || lease == nil || lease.TxID != pair.LocalTxID ||
+			lease.PeerID != pair.PeerID || lease.Role != pair.Role ||
+			lease.Phase != store.FirstCopyActivated || lease.ContentHash != pair.Digest {
+			return false, true, http.StatusServiceUnavailable, syncengine.ProvisioningUnreadableMessage
+		}
+		if read && pair.Role == store.FirstCopySource && requester != "" && requester == pair.PeerID {
+			return true, false, 0, ""
+		}
+		return false, true, http.StatusConflict, syncengine.FirstCopyDirectionMessage
+	}
 	lease, err := e.Store.BoundFirstCopy(gameID)
 	if err != nil {
 		return false, true, http.StatusServiceUnavailable, syncengine.ProvisioningUnreadableMessage
