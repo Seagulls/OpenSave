@@ -68,6 +68,10 @@ func (s *Server) handleRestoreFile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "relPath is required")
 		return
 	}
+	if err := s.Daemon.RefuseFirstCopyContentChange(gameID); err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
 
 	game, err := s.Daemon.Store.GetGame(gameID)
 	if err != nil {
@@ -719,6 +723,11 @@ func (s *Server) importBackupV2(zr *zip.Reader, manifest *backupManifest, mode s
 					size = info.Size()
 				}
 				err = s.Daemon.EnsureImportedSnapshot(gameID, branch, snapID, destPath, size)
+			}
+			if err == nil && mode == "overwrite" {
+				if fenceErr := s.Daemon.RefuseFirstCopyContentChange(gameID); fenceErr != nil {
+					err = fenceErr
+				}
 			}
 			if err == nil && mode == "overwrite" {
 				// A backup file may come from another device: this one's

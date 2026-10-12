@@ -34,6 +34,7 @@ func (s *Server) routes(r chi.Router) {
 	r.Delete("/api/games/{gameId}/first-copy", s.handleAbortFirstCopy)
 	r.Post("/api/games/{gameId}/first-copy/finish", s.handleFinishFirstCopy)
 	r.Post("/api/games/{gameId}/first-copy/activate", s.handleActivateFirstCopy)
+	r.Post("/api/games/{gameId}/first-copy/open", s.handleOpenFirstCopy)
 	r.Get("/api/capabilities", s.handleFirstCopyCapability)
 	r.Get("/api/suggest-name", s.handleSuggestName)
 	r.Post("/api/games/untrack-bulk", s.handleBulkUntrack)
@@ -402,6 +403,7 @@ func (s *Server) handleUpdateGame(w http.ResponseWriter, r *http.Request) {
 
 	oldSavePath := game.SavePath
 	oldAutoSync := game.AutoSync
+	oldActiveBranch := game.ActiveBranch
 	oldIgnore := game.SyncIgnore
 	oldAppID := game.AppID
 	heldBefore, holdErr := s.Daemon.StoreProvisioningHeld(gameID)
@@ -414,6 +416,21 @@ func (s *Server) handleUpdateGame(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	game.ID = gameID // id is not client-mutable
+	// An activated game no longer has a provisioning hold but still has a
+	// named-peer fence. Refuse settings changes that would silently resume
+	// watchers/sync or change the save set whose digest was verified.
+	// Cosmetic metadata edits remain allowed. No lease means no change to
+	// existing settings behavior.
+	lease, leaseErr := s.Daemon.Store.BoundFirstCopy(gameID)
+	if leaseErr != nil {
+		writeError(w, http.StatusServiceUnavailable, "first-copy state is unreadable")
+		return
+	}
+	if lease != nil && lease.Phase == store.FirstCopyActivated &&
+		(game.AutoSync || game.SavePath != oldSavePath || game.SyncIgnore != oldIgnore || game.ActiveBranch != oldActiveBranch) {
+		writeError(w, http.StatusConflict, "first-copy game is activated and isolated; open explicitly before enabling AutoSync or changing its save layout")
+		return
+	}
 	// A hold is not a column on the game. A PATCH that sends autoSync, including
 	// a form that round-trips the whole object, must not clear it and must not
 	// turn the column on while the hold remains. Release is the only unblock.
@@ -672,6 +689,10 @@ func (s *Server) handleRollback(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "snapshotId is required")
 		return
 	}
+	if err := s.Daemon.RefuseFirstCopyContentChange(gameID); err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
 
 	snap, err := s.Daemon.Snapshots.Restore(gameID, body.SnapshotID)
 	if err != nil {
@@ -715,6 +736,10 @@ func (s *Server) handleSwitchBranch(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := readJSON(r, &body); err != nil || body.Name == "" {
 		writeError(w, http.StatusBadRequest, "name is required")
+		return
+	}
+	if err := s.Daemon.RefuseFirstCopyContentChange(gameID); err != nil {
+		writeError(w, http.StatusConflict, err.Error())
 		return
 	}
 

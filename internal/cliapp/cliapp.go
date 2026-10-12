@@ -891,6 +891,10 @@ func cmdRollback(d *daemon.Daemon, args []string) int {
 	if dryRun {
 		return printRestorePreview(d, args[0], args[1], asJSON)
 	}
+	if err := d.RefuseFirstCopyContentChange(args[0]); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		return 1
+	}
 	snap, err := d.Snapshots.Restore(args[0], args[1])
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)

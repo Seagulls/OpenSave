@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -1014,6 +1015,7 @@ func (d *Daemon) firstCopyDigest(game store.Game) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	sort.Slice(roots, func(i, j int) bool { return roots[i].Name < roots[j].Name })
 	for _, root := range roots {
 		manifest, err := delta.BuildManifest(root.Path)
 		if err != nil {
@@ -1069,9 +1071,29 @@ func (d *Daemon) FinishFirstCopy(gameID, txID, expectHash string) (store.FirstCo
 // ActivateFirstCopy lifts this device's hold after verification. It does not
 // speak for the other peer. autoSync defaults to false at the API.
 func (d *Daemon) ActivateFirstCopy(gameID, txID string, enableAutoSync bool) (bool, error) {
+	if enableAutoSync {
+		return false, fmt.Errorf("activated first copy remains isolated; enable AutoSync only after explicit open and convergence checks")
+	}
 	game, err := d.Store.GetGame(gameID)
 	if err != nil {
 		return false, err
+	}
+	lease, err := d.Store.ActiveFirstCopy(gameID)
+	if err != nil {
+		return false, err
+	}
+	if lease == nil || lease.TxID != txID || lease.Phase != store.FirstCopyVerified {
+		return false, fmt.Errorf("first-copy is not verified or has expired")
+	}
+	if d.P2P != nil && d.P2P.Sync != nil && d.P2P.Sync.SyncBusy(gameID) {
+		return false, fmt.Errorf("first-copy sync is still in progress")
+	}
+	digest, err := d.firstCopyDigest(game)
+	if err != nil {
+		return false, err
+	}
+	if digest != lease.ContentHash {
+		return false, fmt.Errorf("first-copy files changed after verification; finish again before activation")
 	}
 	released, err := d.Store.ActivateFirstCopy(gameID, txID, enableAutoSync)
 	if err != nil || !released {
@@ -1084,6 +1106,39 @@ func (d *Daemon) ActivateFirstCopy(gameID, txID string, enableAutoSync bool) (bo
 		}
 	}
 	return released, nil
+}
+
+// OpenFirstCopy deliberately expands access to other paired peers.
+// It revalidates local content immediately before Open, but DOES NOT prove
+// the other endpoint is ready. The orchestration caller must independently
+// verify both peers are activated with matching full-root digests and obtain
+// explicit authorization before calling this method. Do not auto-open.
+func (d *Daemon) OpenFirstCopy(gameID, txID, expectedHash string) error {
+	if expectedHash == "" {
+		return fmt.Errorf("first-copy open requires the verified expected digest")
+	}
+	game, err := d.Store.GetGame(gameID)
+	if err != nil {
+		return err
+	}
+	lease, err := d.Store.BoundFirstCopy(gameID)
+	if err != nil {
+		return err
+	}
+	if lease == nil || lease.TxID != txID || lease.Phase != store.FirstCopyActivated || lease.ContentHash != expectedHash {
+		return fmt.Errorf("first-copy open requires a matching activated transaction and verified digest")
+	}
+	if d.P2P != nil && d.P2P.Sync != nil && d.P2P.Sync.SyncBusy(gameID) {
+		return fmt.Errorf("first-copy open refused while a sync is in progress")
+	}
+	digest, err := d.firstCopyDigest(game)
+	if err != nil {
+		return err
+	}
+	if digest != expectedHash {
+		return fmt.Errorf("first-copy content changed after activation; opening other peers is unsafe")
+	}
+	return d.Store.OpenFirstCopy(gameID, txID)
 }
 
 // validateSavePath rejects save locations that can never be right: paths
@@ -1297,11 +1352,34 @@ func snapIDToTimestamp(snapID string) string {
 	return time.UnixMilli(ms).UTC().Format("2006-01-02T15:04:05.000Z")
 }
 
+// refuseFirstCopyGameChange keeps peer notifications and user lifecycle
+// actions from removing/redirecting a game while its first-copy authority
+// is staged or activated. Ordinary unfenced games are unchanged.
+// RefuseFirstCopyContentChange rejects a restore, branch switch, or cloud
+// pull that would replace a save while a first-copy row exists. No row means
+// the call is a no-op and ordinary restores proceed.
+func (d *Daemon) RefuseFirstCopyContentChange(gameID string) error {
+	return d.refuseFirstCopyGameChange(gameID, "change the save of")
+}
+
+func (d *Daemon) refuseFirstCopyGameChange(gameID, operation string) error {
+	blocked, err := d.Store.FirstCopyBlocksGameChange(gameID)
+	if err != nil {
+		return fmt.Errorf("cannot %s %q: first-copy state unreadable: %w", operation, gameID, err)
+	}
+	if blocked {
+		return fmt.Errorf("cannot %s %q: first-copy transaction or activated fence exists; abort before activation or explicitly open after verification", operation, gameID)
+	}
+	return nil
+}
+
 // UntrackGame stops watching and removes a game. Snapshot zip files on
 // disk are intentionally kept (they're the user's backups); only metadata
 // is removed — same as the JS app.
 func (d *Daemon) UntrackGame(gameID string) error {
-	d.Watcher.Unwatch(gameID)
+	if err := d.refuseFirstCopyGameChange(gameID, "untrack"); err != nil {
+		return err
+	}
 	// Read before deleting: the tombstone remembers where this game was, so
 	// a later re-track puts it back there instead of guessing.
 	name, savePath := "", ""
@@ -1313,6 +1391,7 @@ func (d *Daemon) UntrackGame(gameID string) error {
 	if err := d.Store.DeleteGame(gameID); err != nil {
 		return err
 	}
+	d.Watcher.Unwatch(gameID)
 	// Tombstone stops this device from auto-re-creating the game when a
 	// still-tracking peer asks for its manifest (the "it keeps coming back"
 	// bounce). Propagate the untrack so it registers on paired devices too
@@ -1351,6 +1430,12 @@ func (d *Daemon) LinkGames(canonicalID, aliasID string) error {
 	}
 	if d.provisioningBlocks(canonicalID) || d.provisioningBlocks(aliasID) {
 		return fmt.Errorf("a game still being configured cannot be linked")
+	}
+	if err := d.refuseFirstCopyGameChange(canonicalID, "link"); err != nil {
+		return err
+	}
+	if err := d.refuseFirstCopyGameChange(aliasID, "link"); err != nil {
+		return err
 	}
 	if _, err := d.Store.GetGame(canonicalID); err != nil {
 		return fmt.Errorf("canonical game %q: %w", canonicalID, err)
@@ -1434,6 +1519,14 @@ func (d *Daemon) LinkGames(canonicalID, aliasID string) error {
 // folder by hand is a smaller cost than that, and it is visible.
 func (d *Daemon) UnlinkGame(aliasID string) error {
 	alias, ok := d.Store.GetGameAlias(aliasID)
+	if err := d.refuseFirstCopyGameChange(aliasID, "unlink"); err != nil {
+		return err
+	}
+	if ok {
+		if err := d.refuseFirstCopyGameChange(alias.GameID, "unlink"); err != nil {
+			return err
+		}
+	}
 	if err := d.Store.RemoveGameAlias(aliasID); err != nil {
 		return err
 	}
@@ -1470,11 +1563,14 @@ func (d *Daemon) UnlinkGame(aliasID string) error {
 // untrackFromPeer mirrors a peer's untrack: remove the game + tombstone it,
 // WITHOUT re-notifying (no loop).
 func (d *Daemon) untrackFromPeer(gameID string) {
+	if err := d.refuseFirstCopyGameChange(gameID, "accept peer untrack for"); err != nil {
+		d.Log.Log("warn", err.Error())
+		return
+	}
 	if d.provisioningBlocks(gameID) {
 		d.Log.Log("info", fmt.Sprintf("ignored a peer untrack of %q while it is still being configured", gameID))
 		return
 	}
-	d.Watcher.Unwatch(gameID)
 	// Remember where THIS device kept the game before the record goes. A
 	// re-track on the peer used to bring the game back by auto-tracking from
 	// the peer's manifest request, which invents a local folder by
@@ -1486,9 +1582,13 @@ func (d *Daemon) untrackFromPeer(gameID string) {
 	if game, err := d.Store.GetGame(gameID); err == nil {
 		name, savePath = game.Name, game.SavePath
 	}
-	if err := d.Store.DeleteGame(gameID); err != nil && err != store.ErrNotFound {
-		d.Log.Log("warn", fmt.Sprintf("untrack from peer: delete %q failed: %v", gameID, err))
+	if err := d.Store.DeleteGame(gameID); err != nil {
+		if err != store.ErrNotFound {
+			d.Log.Log("warn", fmt.Sprintf("untrack from peer: delete %q failed: %v", gameID, err))
+			return
+		}
 	}
+	d.Watcher.Unwatch(gameID)
 	_ = d.Store.AddUntrackedTombstone(gameID, name, savePath)
 	// The deletion records describe a folder this device no longer has an
 	// opinion about. Kept, they would outlive the game and could still
@@ -1511,6 +1611,10 @@ func (d *Daemon) untrackFromPeer(gameID string) {
 // remembered, the tombstone is simply cleared and auto-track proceeds as it
 // always did.
 func (d *Daemon) retrackFromPeer(gameID string) {
+	if err := d.refuseFirstCopyGameChange(gameID, "accept peer retrack for"); err != nil {
+		d.Log.Log("warn", err.Error())
+		return
+	}
 	name, savePath := d.Store.RememberedGame(gameID)
 	_ = d.Store.ClearUntrackedTombstone(gameID)
 	if savePath == "" {

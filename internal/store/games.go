@@ -211,9 +211,26 @@ func (s *Store) RenameGameIf(gameID, from, to string) (bool, error) {
 // ListSnapshots, matching the JS app's behavior of the caller owning
 // filesystem cleanup.
 func (s *Store) DeleteGame(id string) error {
-	res, err := s.db.Exec(`DELETE FROM games WHERE id = ?`, id)
+	// SQLite checks the lease in the same statement that deletes the game.
+	// Without this condition, ON DELETE CASCADE silently removes the only
+	// activated first-copy fence. No-row games still use ErrNotFound below.
+	res, err := s.db.Exec(`DELETE FROM games WHERE id = ? AND NOT EXISTS
+        (SELECT 1 FROM game_first_copies WHERE game_id = ?)`, id, id)
 	if err != nil {
 		return fmt.Errorf("delete game %s: %w", id, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		protected, err := s.FirstCopyBlocksGameChange(id)
+		if err != nil {
+			return err
+		}
+		if protected {
+			return fmt.Errorf("cannot delete game %s while a first-copy transaction or fence is recorded; abort before activation or explicitly open after verification", id)
+		}
 	}
 	return checkRowAffected(res)
 }

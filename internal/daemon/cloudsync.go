@@ -652,6 +652,9 @@ func (d *Daemon) pullFromCloud(game store.Game, fileName, deviceName string) err
 
 // AcceptCloudOffer takes the offered save.
 func (d *Daemon) AcceptCloudOffer(gameID, snapshotID string) error {
+	if err := d.RefuseFirstCopyContentChange(gameID); err != nil {
+		return err
+	}
 	d.cloudRd.check.Lock()
 	defer d.cloudRd.check.Unlock()
 	offer, ok := d.findCloudOffer(gameID, snapshotID)

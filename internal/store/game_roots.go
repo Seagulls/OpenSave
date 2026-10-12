@@ -183,6 +183,13 @@ func (s *Store) AddGameRoot(gameID, name, path string) error {
 		return err
 	}
 	defer tx.Rollback()
+	lease, err := s.readFirstCopy(tx, gameID)
+	if err != nil {
+		return err
+	}
+	if lease != nil && lease.Phase == FirstCopyActivated {
+		return fmt.Errorf("cannot change save locations while first-copy fence is activated")
+	}
 	var before string
 	if err := tx.Get(&before, `SELECT path FROM game_roots WHERE game_id = ? AND name = ?`, gameID, n); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("add game root: %w", err)
@@ -240,6 +247,13 @@ func (s *Store) RemoveGameRoot(gameID, name string) error {
 		return err
 	}
 	defer tx.Rollback()
+	lease, err := s.readFirstCopy(tx, gameID)
+	if err != nil {
+		return err
+	}
+	if lease != nil && lease.Phase == FirstCopyActivated {
+		return fmt.Errorf("cannot remove save locations while first-copy fence is activated")
+	}
 
 	if _, err := tx.Exec(`DELETE FROM game_roots WHERE game_id = ? AND name = ?`, gameID, n); err != nil {
 		return fmt.Errorf("remove game root: %w", err)
@@ -284,7 +298,19 @@ func (s *Store) NoteGameRoot(gameID, name string) error {
 	if n == "" {
 		return fmt.Errorf("a save location needs a name")
 	}
-	_, err := s.db.Exec(`
+	tx, err := s.db.Beginx()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	lease, err := s.readFirstCopy(tx, gameID)
+	if err != nil {
+		return err
+	}
+	if lease != nil && lease.Phase == FirstCopyActivated {
+		return fmt.Errorf("cannot discover save locations while first-copy fence is activated")
+	}
+	_, err = tx.Exec(`
 		INSERT INTO game_roots (game_id, name, path, ordinal)
 		VALUES (?, ?, '', COALESCE((SELECT MAX(ordinal) + 1 FROM game_roots WHERE game_id = ?), 0))
 		ON CONFLICT(game_id, name) DO NOTHING`,
@@ -292,5 +318,5 @@ func (s *Store) NoteGameRoot(gameID, name string) error {
 	if err != nil {
 		return fmt.Errorf("note game root: %w", err)
 	}
-	return nil
+	return tx.Commit()
 }

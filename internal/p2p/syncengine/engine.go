@@ -258,7 +258,7 @@ func (e *Engine) SyncGame(ctx context.Context, gameID string, onlinePeers []Peer
 	if holdErr != nil {
 		return nil, fmt.Errorf("%w: %v", ErrProvisioningUnreadable, holdErr)
 	}
-	lease, leaseErr := e.Store.ActiveFirstCopy(gameID)
+	lease, leaseErr := e.Store.BoundFirstCopy(gameID)
 	if leaseErr != nil {
 		return nil, fmt.Errorf("%w: %v", ErrProvisioningUnreadable, leaseErr)
 	}
@@ -480,6 +480,10 @@ func (e *Engine) SyncWithPeer(ctx context.Context, gameID string, peer Peer) (Re
 			return Result{Status: "peer_missing", PeerID: peer.ID, PeerName: peer.Name}, nil
 		}
 		return Result{}, fmt.Errorf("fetch remote manifest: %w", err)
+	}
+
+	if err := e.preflightFirstCopyTarget(ctx, gameID, game, peer, remoteData); err != nil {
+		return Result{}, err
 	}
 
 	// 2. Branch alignment: local follows the remote's active branch.
@@ -708,7 +712,9 @@ func (e *Engine) SyncWithPeer(ctx context.Context, gameID string, peer Peer) (Re
 		// The primary location agreeing says nothing about the others, which
 		// are read through the gate — so the branch hold goes first.
 		releaseAligned()
-		e.syncExtraRoots(ctx, gameID, game, peer, remoteData)
+		if err := e.syncExtraRoots(ctx, gameID, game, peer, remoteData); err != nil {
+			return Result{}, err
+		}
 		return Result{Status: "in_sync", Direction: "none"}, nil
 	}
 
@@ -874,7 +880,9 @@ func (e *Engine) SyncWithPeer(ctx context.Context, gameID string, peer Peer) (Re
 	// Extra locations sync last and on their own terms, so the primary save —
 	// the thing anyone actually opened the app about — is already settled and
 	// recorded before any of them is touched.
-	e.syncExtraRoots(ctx, gameID, game, peer, remoteData)
+	if err := e.syncExtraRoots(ctx, gameID, game, peer, remoteData); err != nil {
+		return Result{}, err
+	}
 
 	return e.classifyResult(decision), nil
 }
@@ -1444,7 +1452,7 @@ func (e *Engine) guardFirstCopy(ctx context.Context, d *Decision, gameID, peerID
 		return nil
 	}
 	fence, fenced := firstCopyFenceFrom(ctx)
-	lease, err := e.Store.ActiveFirstCopy(gameID)
+	lease, err := e.Store.BoundFirstCopy(gameID)
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrProvisioningUnreadable, err)
 	}
@@ -1675,6 +1683,11 @@ func (e *Engine) pullFiles(ctx context.Context, peer Peer, gameID string, game s
 	// with a manifest round trip. See the sync-complete event below.
 	var pulled []string
 	for _, relPath := range filesToPull {
+		if _, fenced := firstCopyFenceFrom(ctx); fenced {
+			if err := e.guardFirstCopy(ctx, &Decision{}, gameID, peer.ID); err != nil {
+				return err
+			}
+		}
 		if !delta.IsSafePath(root.Path, relPath) {
 			return fmt.Errorf("path traversal attempt on pulled file %s", relPath)
 		}

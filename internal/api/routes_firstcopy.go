@@ -89,8 +89,28 @@ func (s *Server) handleActivateFirstCopy(w http.ResponseWriter, r *http.Request)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id": gameID, "released": released, "autoSync": enable,
-		"localOnly": true,
+		"localOnly": true, "directionHeld": true,
 	})
+}
+
+// handleOpenFirstCopy expands this game's access to other paired peers.
+// The caller must already have independently confirmed BOTH devices are
+// ready; a local digest check is not remote attestation. AutoSync stays off.
+func (s *Server) handleOpenFirstCopy(w http.ResponseWriter, r *http.Request) {
+	gameID := chi.URLParam(r, "gameId")
+	var body struct {
+		TxID       string `json:"txId"`
+		ExpectHash string `json:"expectHash"`
+	}
+	if err := readJSON(r, &body); err != nil || body.TxID == "" || body.ExpectHash == "" {
+		writeError(w, http.StatusBadRequest, "txId and expectHash are required")
+		return
+	}
+	if err := s.Daemon.OpenFirstCopy(gameID, body.TxID, body.ExpectHash); err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"id": gameID, "opened": true})
 }
 
 func (s *Server) handleFirstCopyCapability(w http.ResponseWriter, r *http.Request) {

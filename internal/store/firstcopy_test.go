@@ -70,3 +70,28 @@ func TestFirstCopyFinishDoesNotReleaseAndExpiredRowRearms(t *testing.T) {
 		t.Fatal("rearm released the hold")
 	}
 }
+
+func TestFirstCopyExpiredVerifiedCannotActivate(t *testing.T) {
+	s := openTestStore(t)
+	if err := s.UpsertPeer(Peer{ID: "peer-a", Name: "A", Address: "127.0.0.1", Port: 1, Status: "online"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateHeldGame(Game{ID: "expires-after-verify", Name: "Expires", SavePath: t.TempDir()}); err != nil {
+		t.Fatal(err)
+	}
+	row, err := s.BeginFirstCopy("expires-after-verify", FirstCopySource, "peer-a", "hash", 20*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.VerifyFirstCopy("expires-after-verify", row.TxID, "hash"); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(30 * time.Millisecond)
+	if _, err := s.ActivateFirstCopy("expires-after-verify", row.TxID, false); err == nil {
+		t.Fatal("expired verified transaction unexpectedly activated")
+	}
+	held, err := s.ProvisioningHeld("expires-after-verify")
+	if err != nil || !held {
+		t.Fatalf("expiry changed the hold: held=%v err=%v", held, err)
+	}
+}
