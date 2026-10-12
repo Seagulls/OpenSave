@@ -255,7 +255,7 @@ func (m *Manager) createOnBranchFrom(gameID, branch, from, comment string, isSys
 		}
 	}
 
-	snap, zipPath, err := m.claimAndInsert(gameID, branch, backupDir, stagingPath, comment, isSystemAuto)
+	snap, zipPath, err := m.claimAndInsert(gameID, branch, backupDir, stagingPath, comment, isSystemAuto, false)
 	if err != nil {
 		return store.Snapshot{}, err
 	}
@@ -360,7 +360,7 @@ func zipFileCount(zipPath string) (int, error) {
 // Walking forward a millisecond keeps the id numeric, which snapIDToTimestamp
 // relies on to read the time back out of it. Being a millisecond out is
 // meaningless; not existing is not.
-func (m *Manager) claimAndInsert(gameID, branch, backupDir, stagingPath, comment string, isSystemAuto bool) (store.Snapshot, string, error) {
+func (m *Manager) claimAndInsert(gameID, branch, backupDir, stagingPath, comment string, isSystemAuto, pinned bool) (store.Snapshot, string, error) {
 	info, err := os.Stat(stagingPath)
 	if err != nil {
 		return store.Snapshot{}, "", err
@@ -392,6 +392,7 @@ func (m *Manager) claimAndInsert(gameID, branch, backupDir, stagingPath, comment
 			IsSystemAuto: isSystemAuto,
 			ZipPath:      zipPath,
 			SizeBytes:    size,
+			Pinned:       pinned,
 		}
 		if err := m.Store.CreateSnapshot(snap); err != nil {
 			// Put the archive back under the staging name either way, so the

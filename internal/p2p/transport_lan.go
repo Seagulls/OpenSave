@@ -68,7 +68,8 @@ func (t *lanTransport) FetchBlocks(ctx context.Context, peer syncengine.Peer, re
 	// compressor, so the bytes saved cost more than they're worth. Responses
 	// are still decoded, so a peer that compresses anyway is handled.
 	err := t.postJSON(ctx, peer, peerURL(peer, "/blocks/"+ref.GameID), map[string]any{
-		"relPath": ref.RelPath, "root": ref.Root, "blockIndices": blockIndices, "blockSize": blockSize,
+		"relPath": ref.RelPath, "root": ref.Root, "generation": ref.Generation,
+		"blockIndices": blockIndices, "blockSize": blockSize,
 	}, &resp)
 	if err != nil {
 		return nil, err

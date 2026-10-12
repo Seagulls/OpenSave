@@ -53,6 +53,9 @@ func TestFirstCopyActivatedFenceRejectsAbortAndFinish(t *testing.T) {
 	if err := s.OpenFirstCopy(id, "wrong"); err == nil {
 		t.Fatal("wrong tx opened an activated fence")
 	}
+	if err := s.RecordFirstCopyReceipt(id, row.TxID, row.PeerID, row.GenerationID, row.ContentHash); err != nil {
+		t.Fatal(err)
+	}
 	if err := s.OpenFirstCopy(id, row.TxID); err != nil {
 		t.Fatal(err)
 	}
@@ -152,6 +155,9 @@ func TestFirstCopyGameDeletePreservesFenceUntilExplicitOpen(t *testing.T) {
 	}
 	if err := s.RemoveGameRoot(id, "firstcopy-root"); err == nil {
 		t.Fatal("root removal changed activated save set")
+	}
+	if err := s.RecordFirstCopyReceipt(id, row.TxID, row.PeerID, row.GenerationID, row.ContentHash); err != nil {
+		t.Fatal(err)
 	}
 	if err := s.OpenFirstCopy(id, row.TxID); err != nil {
 		t.Fatal(err)

@@ -19,6 +19,7 @@ import (
 	"github.com/opensave/opensave/internal/logging"
 	"github.com/opensave/opensave/internal/p2p/pairing"
 	"github.com/opensave/opensave/internal/p2p/syncengine"
+	"github.com/opensave/opensave/internal/snapshot"
 	"github.com/opensave/opensave/internal/store"
 	"github.com/opensave/opensave/internal/switchtitle"
 	"github.com/opensave/opensave/internal/version"
@@ -54,7 +55,7 @@ func (e *Engine) RegisterRoutes(r chi.Router) {
 }
 
 func (e *Engine) handleCapabilities(w http.ResponseWriter, r *http.Request) {
-	jsonOK(w, map[string]any{"firstCopy": "1"})
+	jsonOK(w, map[string]any{"firstCopy": "2"})
 }
 
 func clientIP(r *http.Request) string {
@@ -718,11 +719,23 @@ func (e *Engine) handleManifest(w http.ResponseWriter, r *http.Request) {
 	// field. An unreadable extra location is logged and left out rather than
 	// listed empty, which the peer would read as everything in it being
 	// deleted.
-	extra, rootsErr := e.Store.GameRootPaths(gameID)
-	if rootsErr != nil {
-		extra = nil
+	var manifest delta.Manifest
+	var generation *syncengine.FirstCopyGeneration
+	var failures map[string]error
+	if view, pinned, genErr := e.sourceGeneration(game.ID); genErr != nil {
+		jsonError(w, http.StatusConflict, "first-copy generation is missing or damaged")
+		return
+	} else if pinned {
+		manifest = view.value.Manifest
+		identity := view.identity
+		generation = &identity
+	} else {
+		extra, rootsErr := e.Store.GameRootPaths(gameID)
+		if rootsErr != nil {
+			extra = nil
+		}
+		manifest, failures, err = delta.BuildMultiManifest(game.SavePath, extra)
 	}
-	manifest, failures, err := delta.BuildMultiManifest(game.SavePath, extra)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, "manifest build failed: "+err.Error())
 		return
@@ -742,6 +755,7 @@ func (e *Engine) handleManifest(w http.ResponseWriter, r *http.Request) {
 		Manifest:          manifest,
 		ActiveBranch:      game.ActiveBranch,
 		Proto:             ServedProto(),
+		FirstCopy:         generation,
 		DeletionConfirmed: e.Sync.DeletionConfirmed(game.ID),
 	}
 	if latest, err := e.Snapshots.LatestSnapshot(gameID, ""); err == nil {
@@ -767,10 +781,11 @@ func (e *Engine) handleBlocks(w http.ResponseWriter, r *http.Request) {
 		// Root names which save location the path is relative to. Absent on
 		// every peer that predates multi-root, which is why it is only ever
 		// sent to a peer that answered a manifest request with a proto.
-		Root         string   `json:"root"`
-		BlockIndices []int    `json:"blockIndices"`
-		BlockSize    int      `json:"blockSize"`
-		Encodings    []string `json:"encodings"`
+		Root         string                          `json:"root"`
+		Generation   *syncengine.FirstCopyGeneration `json:"generation"`
+		BlockIndices []int                           `json:"blockIndices"`
+		BlockSize    int                             `json:"blockSize"`
+		Encodings    []string                        `json:"encodings"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.RelPath == "" {
 		jsonError(w, http.StatusBadRequest, "relPath is required")
@@ -784,6 +799,39 @@ func (e *Engine) handleBlocks(w http.ResponseWriter, r *http.Request) {
 	}
 	if stop, status, msg := e.peerGameAccess(game.ID, lanPeerID(r), true); stop {
 		jsonError(w, status, msg)
+		return
+	}
+	if view, pinned, genErr := e.sourceGeneration(game.ID); genErr != nil {
+		jsonError(w, http.StatusConflict, "first-copy generation is missing or damaged")
+		return
+	} else if pinned {
+		if !view.matches(body.Generation) {
+			jsonError(w, http.StatusConflict, "first-copy generation request does not match the pinned source")
+			return
+		}
+		rootManifest, rootOK := view.value.Manifest.Extra[body.Root]
+		if body.Root == delta.PrimaryRoot {
+			rootManifest = view.value.Manifest.Root(delta.PrimaryRoot)
+			rootOK = true
+		}
+		if !rootOK {
+			jsonError(w, http.StatusNotFound, "first-copy generation has no such root")
+			return
+		}
+		entry, ok := rootManifest.Files[body.RelPath]
+		if !ok {
+			jsonError(w, http.StatusConflict, "first-copy generation has no such file")
+			return
+		}
+		blocks, err := snapshot.ReadGenerationBlocks(
+			view.snapshot.ZipPath, body.Root, body.RelPath,
+			body.BlockIndices, body.BlockSize, entry,
+		)
+		if err != nil {
+			jsonError(w, http.StatusConflict, "first-copy generation block verification failed: "+err.Error())
+			return
+		}
+		jsonOK(w, map[string]any{"blocks": encodeBlocks(blocks, wantsGzip(body.Encodings))})
 		return
 	}
 	base, ok := e.resolveServeRoot(gameID, game, body.Root)
@@ -804,7 +852,6 @@ func (e *Engine) handleBlocks(w http.ResponseWriter, r *http.Request) {
 	if isFile, _ := delta.ResolveLocalSaveFilePath(base); isFile {
 		fullPath = base
 	}
-
 	blocks, err := delta.ReadBlocks(fullPath, body.BlockIndices, body.BlockSize)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, "read blocks failed: "+err.Error())

@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/opensave/opensave/internal/delta"
+	"github.com/opensave/opensave/internal/snapshot"
 	"github.com/opensave/opensave/internal/store"
 )
 
@@ -25,6 +26,17 @@ func (e *Engine) preflightFirstCopyTarget(ctx context.Context, gameID string, ga
 	}
 	if lease == nil || lease.TxID != fence.TxID || lease.Role != fence.Role || lease.PeerID != peer.ID || lease.Phase != store.FirstCopyCopying {
 		return fmt.Errorf("%w: first-copy lease changed or is no longer copying", ErrFirstCopyDirection)
+	}
+	if game.SyncIgnore != "" {
+		return fmt.Errorf("first copy refused: per-device exclusion rules cannot certify identical endpoint content")
+	}
+	if remote.FirstCopy == nil || remote.FirstCopy.Protocol != FirstCopyGenerationProtocol ||
+		remote.FirstCopy.ID == "" || remote.FirstCopy.TxID == "" || remote.FirstCopy.Digest == "" {
+		return fmt.Errorf("first copy refused: source did not advertise an immutable generation")
+	}
+	if remote.FirstCopy.Branch != remote.ActiveBranch ||
+		remote.FirstCopy.Digest != snapshot.GenerationManifestDigest(remote.Manifest) {
+		return fmt.Errorf("first copy refused: source generation identity does not match its manifest")
 	}
 	if remote.ActiveBranch != "" && remote.ActiveBranch != game.ActiveBranch {
 		return fmt.Errorf("first copy refused: branch mismatch (%q / %q)", game.ActiveBranch, remote.ActiveBranch)

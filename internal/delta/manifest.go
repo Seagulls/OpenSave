@@ -226,6 +226,38 @@ func HashFile(path string) (FileEntry, error) {
 	}, nil
 }
 
+// HashBytes is HashFile for bytes already in memory. A first-copy generation
+// is a snapshot archive, not the live path.
+func HashBytes(name string, body []byte) (FileEntry, error) {
+	_ = name
+	blockSize := BlockSizeFor(int64(len(body)))
+	whole := sha256.New()
+	var blocks []Block
+	for index, off := 0, 0; off < len(body) || (off == 0 && len(body) == 0); index++ {
+		end := off + blockSize
+		if end > len(body) {
+			end = len(body)
+		}
+		chunk := body[off:end]
+		if len(chunk) == 0 && len(body) > 0 {
+			break
+		}
+		whole.Write(chunk)
+		blocks = append(blocks, Block{Index: index, Hash: hashBytes(chunk), Length: len(chunk)})
+		if len(body) == 0 {
+			break
+		}
+		off = end
+		if off >= len(body) {
+			break
+		}
+	}
+	return FileEntry{
+		Size: int64(len(body)), Hash: hex.EncodeToString(whole.Sum(nil)),
+		Blocks: blocks, BlockSize: blockSize,
+	}, nil
+}
+
 // BuildManifest walks root (a directory or a single file, per
 // ResolveLocalSaveFilePath) and returns a full Manifest of its contents.
 // Builds of one folder that overlap are coalesced (manifest_builds.go); the

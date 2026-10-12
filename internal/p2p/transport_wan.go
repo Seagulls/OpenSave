@@ -72,7 +72,8 @@ func (t *wanTransport) FetchBlocks(ctx context.Context, peer syncengine.Peer, re
 	}
 
 	raw, err := t.wan.Request(ctx, peer.ID, "/blocks/"+ref.GameID, "POST", map[string]any{
-		"relPath": ref.RelPath, "root": ref.Root, "blockIndices": blockIndices, "blockSize": blockSize,
+		"relPath": ref.RelPath, "root": ref.Root, "generation": ref.Generation,
+		"blockIndices": blockIndices, "blockSize": blockSize,
 		// Peers that don't understand this ignore it and reply with raw
 		// blocks, which decodeBlocks passes straight through.
 		"encodings": gzipEncodings,

@@ -147,8 +147,16 @@ func addFileEntry(w *zip.Writer, filePath, entryName string) (string, error) {
 		return "", err
 	}
 	sum := sha256.New()
-	if _, err := io.Copy(io.MultiWriter(entry, sum), io.MultiReader(bytes.NewReader(head), f)); err != nil {
+	written, err := io.Copy(io.MultiWriter(entry, sum), io.MultiReader(bytes.NewReader(head), f))
+	if err != nil {
 		return "", err
+	}
+	after, err := f.Stat()
+	if err != nil {
+		return "", err
+	}
+	if written != info.Size() || after.Size() != info.Size() || !after.ModTime().Equal(info.ModTime()) {
+		return "", fmt.Errorf("source changed while it was being archived")
 	}
 	return hex.EncodeToString(sum.Sum(nil)), nil
 }

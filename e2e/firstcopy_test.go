@@ -2,7 +2,9 @@ package e2e
 
 import (
 	"net/http"
+	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -11,9 +13,10 @@ import (
 )
 
 type firstCopyRow struct {
-	TxID   string `json:"txId"`
-	Role   string `json:"role"`
-	PeerID string `json:"peerId"`
+	TxID         string `json:"txId"`
+	Role         string `json:"role"`
+	PeerID       string `json:"peerId"`
+	GenerationID string `json:"generationId"`
 }
 
 func beginCopy(t *testing.T, node *testutil.TestDaemon, gameID, role, peerID string) firstCopyRow {
@@ -57,6 +60,172 @@ func TestFirstCopy_TwoPeerActivate(t *testing.T) {
 	}
 	if readHoldFile(t, src, "slot.sav") != "SOURCE-BYTES" {
 		t.Fatal("two-peer activate changed the source")
+	}
+}
+
+func TestFirstCopy_LiveMutationDoesNotChangeServedGeneration(t *testing.T) {
+	source := testutil.NewTestDaemon(t, "Gen-Source")
+	target := testutil.NewTestDaemon(t, "Gen-Target")
+	source.PairWith(target)
+	const id = "generation-game"
+	src := sideDir(t, source, "gen")
+	tgt := sideDir(t, target, "gen")
+	writeHoldFile(t, src, "slot.sav", "GENERATION")
+	createHeld(t, source, id, "Generation", src)
+	createHeld(t, target, id, "Generation", tgt)
+	lease := beginCopy(t, source, id, "source", target.NodeID())
+	if lease.TxID == "" || lease.GenerationID == "" {
+		t.Fatal("source begin did not pin a generation")
+	}
+	again := beginCopy(t, source, id, "source", target.NodeID())
+	if again.TxID != lease.TxID || again.GenerationID != lease.GenerationID {
+		t.Fatalf("repeat begin substituted a generation: %+v %+v", lease, again)
+	}
+	writeHoldFile(t, src, "slot.sav", "MUTATED-LIVE")
+	beginCopy(t, target, id, "target", source.NodeID())
+	if !testutil.WaitFor(45*time.Second, func() bool {
+		target.APIStatus(http.MethodPost, "/api/games/"+id+"/sync", nil, nil)
+		return readHoldFile(t, tgt, "slot.sav") == "GENERATION"
+	}) {
+		t.Fatalf("target received %q, want the pinned generation", readHoldFile(t, tgt, "slot.sav"))
+	}
+	if readHoldFile(t, src, "slot.sav") != "MUTATED-LIVE" {
+		t.Fatal("pinning the generation altered the live save")
+	}
+	if status := source.APIStatus(http.MethodPost, "/api/games/"+id+"/first-copy/open", map[string]string{"txId": lease.TxID}, nil); status < 400 {
+		t.Fatal("open succeeded without the other peer's receipt")
+	}
+}
+
+func TestFirstCopy_MultiRootGenerationParityLANAndWAN(t *testing.T) {
+	for _, mode := range []string{"lan", "wan"} {
+		t.Run(mode, func(t *testing.T) {
+			source := testutil.NewTestDaemon(t, "Roots-Source-"+mode)
+			target := testutil.NewTestDaemon(t, "Roots-Target-"+mode)
+			if mode == "wan" {
+				pairOverRelay(t, source, target, startRelay(t), "first-copy-roots")
+			} else {
+				source.PairWith(target)
+			}
+
+			id := "first-copy-roots-" + mode
+			src := sideDir(t, source, "roots-primary")
+			tgt := sideDir(t, target, "roots-primary")
+			srcConfig := sideDir(t, source, "roots-config")
+			tgtConfig := sideDir(t, target, "roots-config")
+			writeHoldFile(t, src, "same.sav", "PRIMARY-"+mode)
+			writeHoldFile(t, srcConfig, "same.sav", "CONFIG-"+mode)
+			createHeld(t, source, id, "Roots", src)
+			createHeld(t, target, id, "Roots", tgt)
+			if err := source.Daemon.Store.AddGameRoot(id, "config", srcConfig); err != nil {
+				t.Fatal(err)
+			}
+			if err := target.Daemon.Store.AddGameRoot(id, "config", tgtConfig); err != nil {
+				t.Fatal(err)
+			}
+			beginCopy(t, source, id, "source", target.NodeID())
+			beginCopy(t, target, id, "target", source.NodeID())
+			if !testutil.WaitFor(45*time.Second, func() bool {
+				target.APIStatus(http.MethodPost, "/api/games/"+id+"/sync", nil, nil)
+				return readHoldFile(t, tgt, "same.sav") == "PRIMARY-"+mode &&
+					readHoldFile(t, tgtConfig, "same.sav") == "CONFIG-"+mode
+			}) {
+				t.Fatalf("multi-root first copy failed: primary=%q config=%q",
+					readHoldFile(t, tgt, "same.sav"), readHoldFile(t, tgtConfig, "same.sav"))
+			}
+		})
+	}
+}
+
+func TestFirstCopy_ConcurrentBeginBindsOneGeneration(t *testing.T) {
+	source := testutil.NewTestDaemon(t, "Concurrent-Source")
+	target := testutil.NewTestDaemon(t, "Concurrent-Target")
+	source.PairWith(target)
+	const id = "concurrent-generation"
+	src := sideDir(t, source, "concurrent")
+	writeHoldFile(t, src, "slot.sav", "ONE-GENERATION")
+	createHeld(t, source, id, "Concurrent", src)
+
+	const callers = 8
+	rows := make(chan store.FirstCopy, callers)
+	errs := make(chan error, callers)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			row, err := source.Daemon.BeginFirstCopy(id, store.FirstCopySource, target.NodeID(), time.Hour)
+			rows <- row
+			errs <- err
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(rows)
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	var txID, generationID string
+	for row := range rows {
+		if txID == "" {
+			txID, generationID = row.TxID, row.GenerationID
+		}
+		if row.TxID != txID || row.GenerationID != generationID {
+			t.Fatalf("concurrent Begin substituted content: first=%s/%s got=%s/%s",
+				txID, generationID, row.TxID, row.GenerationID)
+		}
+	}
+	snaps, err := source.Daemon.Store.ListSnapshots(id, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pinned := 0
+	for _, snap := range snaps {
+		if snap.Pinned {
+			pinned++
+			if snap.ID != generationID {
+				t.Fatalf("wrong snapshot pinned: %+v", snap)
+			}
+		}
+	}
+	if pinned != 1 {
+		t.Fatalf("pinned generations = %d, want one", pinned)
+	}
+}
+
+func TestFirstCopy_MissingGenerationFailsClosed(t *testing.T) {
+	source := testutil.NewTestDaemon(t, "Missing-Source")
+	target := testutil.NewTestDaemon(t, "Missing-Target")
+	source.PairWith(target)
+	const id = "missing-generation"
+	src := sideDir(t, source, "missing")
+	tgt := sideDir(t, target, "missing")
+	writeHoldFile(t, src, "slot.sav", "MUST-NOT-FALL-BACK")
+	createHeld(t, source, id, "Missing", src)
+	createHeld(t, target, id, "Missing", tgt)
+	lease := beginCopy(t, source, id, "source", target.NodeID())
+	snap, err := source.Daemon.Store.GetSnapshot(lease.GenerationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(snap.ZipPath); err != nil {
+		t.Fatal(err)
+	}
+	beginCopy(t, target, id, "target", source.NodeID())
+	for i := 0; i < 3; i++ {
+		target.APIStatus(http.MethodPost, "/api/games/"+id+"/sync", nil, nil)
+	}
+	if got := readHoldFile(t, tgt, "slot.sav"); got != "" {
+		t.Fatalf("missing generation fell back to live source: %q", got)
+	}
+	recorded, err := source.Daemon.Store.RecordedFirstCopy(id)
+	if err != nil || recorded == nil || recorded.GenerationID != lease.GenerationID {
+		t.Fatalf("missing archive destroyed ownership: %+v %v", recorded, err)
 	}
 }
 

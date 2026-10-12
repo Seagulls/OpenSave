@@ -622,13 +622,32 @@ func (w *WanClient) serveManifest(route string, body json.RawMessage, peerID str
 	}
 	defer readDone()
 
-	manifest, err := delta.BuildManifest(game.SavePath)
-	if err != nil {
-		return 500, map[string]string{"error": err.Error()}
+	var manifest delta.Manifest
+	var generation *syncengine.FirstCopyGeneration
+	if view, pinned, genErr := w.engine.sourceGeneration(game.ID); genErr != nil {
+		return 409, map[string]string{"error": "first-copy generation is missing or damaged"}
+	} else if pinned {
+		manifest = view.value.Manifest
+		identity := view.identity
+		generation = &identity
+	} else {
+		extra, rootsErr := w.engine.Store.GameRootPaths(gameID)
+		if rootsErr != nil {
+			return 500, map[string]string{"error": rootsErr.Error()}
+		}
+		var failures map[string]error
+		manifest, failures, err = delta.BuildMultiManifest(game.SavePath, extra)
+		if err != nil {
+			return 500, map[string]string{"error": err.Error()}
+		}
+		for name, failure := range failures {
+			w.engine.Log("warn", fmt.Sprintf("could not read the %q location of %q: %v — it is left out of this sync", name, game.Name, failure))
+		}
 	}
 	w.engine.Sync.NoteServed(game.ID, peerID, manifest) // syncengine/served.go
 	resp := map[string]any{
 		"gameId": gameID, "activeBranch": game.ActiveBranch, "manifest": manifest,
+		"proto": ServedProto(), "firstCopyGeneration": generation,
 		"deletionConfirmed": w.engine.Sync.DeletionConfirmed(game.ID),
 	}
 	if latest, err := w.engine.Snapshots.LatestSnapshot(gameID, ""); err == nil {
@@ -642,10 +661,12 @@ func (w *WanClient) serveManifest(route string, body json.RawMessage, peerID str
 func (w *WanClient) serveBlocks(route string, rawBody json.RawMessage, fromPeerID string) (int, any) {
 	gameID := route[strings.LastIndex(route, "/")+1:]
 	var body struct {
-		RelPath      string   `json:"relPath"`
-		BlockIndices []int    `json:"blockIndices"`
-		BlockSize    int      `json:"blockSize"`
-		Encodings    []string `json:"encodings"`
+		RelPath      string                          `json:"relPath"`
+		Root         string                          `json:"root"`
+		Generation   *syncengine.FirstCopyGeneration `json:"generation"`
+		BlockIndices []int                           `json:"blockIndices"`
+		BlockSize    int                             `json:"blockSize"`
+		Encodings    []string                        `json:"encodings"`
 	}
 	if err := json.Unmarshal(rawBody, &body); err != nil || body.RelPath == "" {
 		return 400, map[string]string{"error": "relPath is required"}
@@ -658,24 +679,52 @@ func (w *WanClient) serveBlocks(route string, rawBody json.RawMessage, fromPeerI
 	if stop, status, msg := w.engine.peerGameAccess(game.ID, fromPeerID, true); stop {
 		return status, map[string]string{"error": msg}
 	}
-	if !delta.IsSafePath(game.SavePath, body.RelPath) {
-		return 403, map[string]string{"error": "Access denied: path traversal attempt detected."}
+	if view, pinned, genErr := w.engine.sourceGeneration(game.ID); genErr != nil {
+		return 409, map[string]string{"error": "first-copy generation is missing or damaged"}
+	} else if pinned {
+		if !view.matches(body.Generation) {
+			return 409, map[string]string{"error": "first-copy generation request does not match the pinned source"}
+		}
+		rootManifest, rootOK := view.value.Manifest.Extra[body.Root]
+		if body.Root == delta.PrimaryRoot {
+			rootManifest = view.value.Manifest.Root(delta.PrimaryRoot)
+			rootOK = true
+		}
+		if !rootOK {
+			return 404, map[string]string{"error": "first-copy generation has no such root"}
+		}
+		entry, ok := rootManifest.Files[body.RelPath]
+		if !ok {
+			return 409, map[string]string{"error": "first-copy generation has no such file"}
+		}
+		blocks, readErr := snapshot.ReadGenerationBlocks(
+			view.snapshot.ZipPath, body.Root, body.RelPath,
+			body.BlockIndices, body.BlockSize, entry,
+		)
+		if readErr != nil {
+			return 409, map[string]string{"error": "first-copy generation block verification failed"}
+		}
+		out := encodeBlocks(blocks, wantsGzip(body.Encodings))
+		return 200, map[string]any{"relPath": body.RelPath, "root": body.Root, "blocks": out}
 	}
 
-	// Resolved, not joined: this device's manifest advertises the agreed
-	// (composed) spelling, while the file on this disk may be stored
-	// decomposed — a macOS save. Joining the key verbatim would fail to
-	// find the very file this device just offered.
-	fullPath := delta.LocalNameFor(game.SavePath, body.RelPath)
-	if isFile, _ := delta.ResolveLocalSaveFilePath(game.SavePath); isFile {
-		fullPath = game.SavePath
+	base, ok := w.engine.resolveServeRoot(gameID, game, body.Root)
+	if !ok {
+		return 404, map[string]string{"error": "This device has no such save location for that game."}
+	}
+	if !delta.IsSafePath(base, body.RelPath) {
+		return 403, map[string]string{"error": "Access denied: path traversal attempt detected."}
+	}
+	fullPath := delta.LocalNameFor(base, body.RelPath)
+	if isFile, _ := delta.ResolveLocalSaveFilePath(base); isFile {
+		fullPath = base
 	}
 	blocks, err := delta.ReadBlocks(fullPath, body.BlockIndices, body.BlockSize)
 	if err != nil {
 		return 500, map[string]string{"error": err.Error()}
 	}
 	out := encodeBlocks(blocks, wantsGzip(body.Encodings))
-	return 200, map[string]any{"relPath": body.RelPath, "blocks": out}
+	return 200, map[string]any{"relPath": body.RelPath, "root": body.Root, "blocks": out}
 }
 
 // serveDeleteFile applies a deletion a peer asked for over the relay.

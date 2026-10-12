@@ -35,7 +35,7 @@ func (s *Server) handleAbortFirstCopy(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "txId is required")
 		return
 	}
-	if err := s.Daemon.Store.AbortFirstCopy(gameID, body.TxID); err != nil {
+	if err := s.Daemon.AbortFirstCopy(gameID, body.TxID); err != nil {
 		writeError(w, http.StatusConflict, err.Error())
 		return
 	}
@@ -114,5 +114,5 @@ func (s *Server) handleOpenFirstCopy(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleFirstCopyCapability(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"firstCopy": "1"})
+	writeJSON(w, http.StatusOK, map[string]any{"firstCopy": "2"})
 }

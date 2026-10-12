@@ -26,14 +26,16 @@ const (
 // both keep the hold. Activate atomically releases the hold but RETAINS the
 // named-peer lease as an activated direction fence until explicit Open.
 type FirstCopy struct {
-	GameID      string `db:"game_id" json:"gameId"`
-	TxID        string `db:"tx_id" json:"txId"`
-	Role        string `db:"role" json:"role"`
-	PeerID      string `db:"peer_id" json:"peerId"`
-	Phase       string `db:"phase" json:"phase"`
-	ContentHash string `db:"content_hash" json:"contentHash"`
-	CreatedAt   string `db:"created_at" json:"createdAt"`
-	ExpiresAt   string `db:"expires_at" json:"expiresAt"`
+	GameID           string `db:"game_id" json:"gameId"`
+	TxID             string `db:"tx_id" json:"txId"`
+	Role             string `db:"role" json:"role"`
+	PeerID           string `db:"peer_id" json:"peerId"`
+	Phase            string `db:"phase" json:"phase"`
+	ContentHash      string `db:"content_hash" json:"contentHash"`
+	GenerationID     string `db:"generation_id" json:"generationId"`
+	GenerationBranch string `db:"generation_branch" json:"generationBranch"`
+	CreatedAt        string `db:"created_at" json:"createdAt"`
+	ExpiresAt        string `db:"expires_at" json:"expiresAt"`
 }
 
 func (f FirstCopy) expired(now time.Time) bool {
@@ -47,7 +49,7 @@ type rowQuery interface {
 
 func (s *Store) readFirstCopy(q rowQuery, gameID string) (*FirstCopy, error) {
 	var row FirstCopy
-	err := q.Get(&row, `SELECT game_id, tx_id, role, peer_id, phase, content_hash, created_at, expires_at FROM game_first_copies WHERE game_id = ?`, gameID)
+	err := q.Get(&row, `SELECT game_id, tx_id, role, peer_id, phase, content_hash, generation_id, generation_branch, created_at, expires_at FROM game_first_copies WHERE game_id = ?`, gameID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -55,6 +57,19 @@ func (s *Store) readFirstCopy(q rowQuery, gameID string) (*FirstCopy, error) {
 		return nil, fmt.Errorf("first-copy %s: %w", gameID, err)
 	}
 	return &row, nil
+}
+
+// RecordedFirstCopy returns the durable transaction even when its transfer
+// lease expired. Expiry removes permission; it does not release generation
+// ownership or authorize replacing that generation on retry.
+func (s *Store) RecordedFirstCopy(gameID string) (*FirstCopy, error) {
+	if s == nil || gameID == "" {
+		return nil, nil
+	}
+	if err := s.provisioningFault(); err != nil {
+		return nil, err
+	}
+	return s.readFirstCopy(s.db, gameID)
 }
 
 // ActiveFirstCopy is the unexpired lease, or nil. A database error is
@@ -171,6 +186,11 @@ func (s *Store) BeginFirstCopy(gameID, role, peerID, contentHash string, ttl tim
 		if _, err := tx.Exec(`DELETE FROM game_first_copies WHERE game_id = ? AND tx_id = ?`, gameID, existing.TxID); err != nil {
 			return FirstCopy{}, err
 		}
+		if existing.GenerationID != "" {
+			if _, err := tx.Exec(`UPDATE snapshots SET pinned = 0 WHERE id = ?`, existing.GenerationID); err != nil {
+				return FirstCopy{}, err
+			}
+		}
 	}
 	var buf [16]byte
 	if _, err := rand.Read(buf[:]); err != nil {
@@ -189,6 +209,163 @@ func (s *Store) BeginFirstCopy(gameID, role, peerID, contentHash string, ttl tim
 		return FirstCopy{}, fmt.Errorf("insert first-copy: %w", err)
 	}
 	return row, tx.Commit()
+}
+
+// RearmFirstCopy renews an expired transfer without changing its transaction
+// or immutable generation. It is the retry path after restart or timeout.
+func (s *Store) RearmFirstCopy(gameID, role, peerID string, ttl time.Duration) (FirstCopy, error) {
+	if ttl <= 0 || ttl > 2*time.Hour {
+		ttl = 30 * time.Minute
+	}
+	tx, err := s.db.Beginx()
+	if err != nil {
+		return FirstCopy{}, err
+	}
+	defer tx.Rollback()
+	row, err := s.readFirstCopy(tx, gameID)
+	if err != nil {
+		return FirstCopy{}, err
+	}
+	if row == nil || row.Role != role || row.PeerID != peerID {
+		return FirstCopy{}, fmt.Errorf("first-copy transaction does not match the requested peer and role")
+	}
+	if row.Phase == FirstCopyActivated {
+		return *row, nil
+	}
+	if row.Phase != FirstCopyCopying && row.Phase != FirstCopyVerified {
+		return FirstCopy{}, fmt.Errorf("first-copy retry refused in phase %q", row.Phase)
+	}
+	if role == FirstCopySource && row.GenerationID == "" {
+		return FirstCopy{}, fmt.Errorf("first-copy source generation is incomplete")
+	}
+	if !row.expired(time.Now()) {
+		return *row, nil
+	}
+	expires := time.Now().UTC().Add(ttl).Format(time.RFC3339Nano)
+	res, err := tx.Exec(`UPDATE game_first_copies SET expires_at = ? WHERE game_id = ? AND tx_id = ? AND generation_id = ?`,
+		expires, gameID, row.TxID, row.GenerationID)
+	if err != nil {
+		return FirstCopy{}, err
+	}
+	if n, err := res.RowsAffected(); err != nil || n != 1 {
+		return FirstCopy{}, fmt.Errorf("first-copy changed while renewing: affected=%d err=%v", n, err)
+	}
+	row.ExpiresAt = expires
+	return *row, tx.Commit()
+}
+
+// BeginFirstCopySource atomically pins and binds one already-certified
+// snapshot. usedGeneration is false when another same-peer Begin won the race;
+// callers may then delete their unbound candidate without affecting the
+// winning transaction.
+func (s *Store) BeginFirstCopySource(gameID, peerID string, ttl time.Duration, snap Snapshot, digest string) (row FirstCopy, usedGeneration bool, err error) {
+	if gameID == "" || peerID == "" || snap.ID == "" || digest == "" {
+		return FirstCopy{}, false, fmt.Errorf("first-copy source generation is incomplete")
+	}
+	if _, err := s.GetPeer(peerID); err != nil {
+		return FirstCopy{}, false, fmt.Errorf("first-copy peer %s: %w", peerID, err)
+	}
+	if ttl <= 0 || ttl > 2*time.Hour {
+		ttl = 30 * time.Minute
+	}
+	tx, err := s.db.Beginx()
+	if err != nil {
+		return FirstCopy{}, false, err
+	}
+	defer tx.Rollback()
+	held, err := txHeld(tx, gameID)
+	if err != nil {
+		return FirstCopy{}, false, err
+	}
+	if !held {
+		return FirstCopy{}, false, fmt.Errorf("first-copy requires the game to still be held")
+	}
+	var snapshotCount int
+	if err := tx.Get(&snapshotCount,
+		`SELECT COUNT(*) FROM snapshots WHERE id = ? AND game_id = ? AND branch_name = ?`,
+		snap.ID, gameID, snap.BranchName); err != nil || snapshotCount != 1 {
+		return FirstCopy{}, false, fmt.Errorf("first-copy generation snapshot is not available")
+	}
+	existing, err := s.readFirstCopy(tx, gameID)
+	if err != nil {
+		return FirstCopy{}, false, err
+	}
+	if existing != nil {
+		if existing.Role != FirstCopySource || existing.PeerID != peerID {
+			return FirstCopy{}, false, fmt.Errorf("first-copy for %s is already bound to %s as %s", gameID, existing.PeerID, existing.Role)
+		}
+		if existing.GenerationID != "" {
+			return *existing, false, nil
+		}
+		if existing.Phase != FirstCopyCopying {
+			return FirstCopy{}, false, fmt.Errorf("first-copy generation cannot bind in phase %q", existing.Phase)
+		}
+	}
+	now := time.Now().UTC()
+	if existing == nil {
+		var buf [16]byte
+		if _, err := rand.Read(buf[:]); err != nil {
+			return FirstCopy{}, false, err
+		}
+		row = FirstCopy{
+			GameID: gameID, TxID: hex.EncodeToString(buf[:]), Role: FirstCopySource,
+			PeerID: peerID, Phase: FirstCopyCopying, ContentHash: digest,
+			GenerationID: snap.ID, GenerationBranch: snap.BranchName,
+			CreatedAt: now.Format(time.RFC3339Nano),
+			ExpiresAt: now.Add(ttl).Format(time.RFC3339Nano),
+		}
+		if _, err := tx.Exec(
+			`INSERT INTO game_first_copies
+			 (game_id, tx_id, role, peer_id, phase, content_hash, generation_id, generation_branch, created_at, expires_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			row.GameID, row.TxID, row.Role, row.PeerID, row.Phase, row.ContentHash,
+			row.GenerationID, row.GenerationBranch, row.CreatedAt, row.ExpiresAt,
+		); err != nil {
+			return FirstCopy{}, false, fmt.Errorf("insert first-copy source: %w", err)
+		}
+	} else {
+		row = *existing
+		row.ContentHash = digest
+		row.GenerationID = snap.ID
+		row.GenerationBranch = snap.BranchName
+		row.ExpiresAt = now.Add(ttl).Format(time.RFC3339Nano)
+		res, err := tx.Exec(
+			`UPDATE game_first_copies
+			 SET content_hash = ?, generation_id = ?, generation_branch = ?, expires_at = ?
+			 WHERE game_id = ? AND tx_id = ? AND role = ? AND generation_id = '' AND phase = ?`,
+			digest, snap.ID, snap.BranchName, row.ExpiresAt,
+			gameID, row.TxID, FirstCopySource, FirstCopyCopying,
+		)
+		if err != nil {
+			return FirstCopy{}, false, err
+		}
+		if n, err := res.RowsAffected(); err != nil || n != 1 {
+			return FirstCopy{}, false, fmt.Errorf("first-copy generation changed while binding")
+		}
+	}
+	res, err := tx.Exec(`UPDATE snapshots SET pinned = 1 WHERE id = ? AND game_id = ?`, snap.ID, gameID)
+	if err != nil {
+		return FirstCopy{}, false, err
+	}
+	if n, err := res.RowsAffected(); err != nil || n != 1 {
+		return FirstCopy{}, false, fmt.Errorf("first-copy generation could not be pinned")
+	}
+	if err := tx.Commit(); err != nil {
+		return FirstCopy{}, false, err
+	}
+	return row, true, nil
+}
+
+// RecordFirstCopyReceipt stores a named peer's acknowledgement of one generation.
+// A different peer, transaction, or digest does not overwrite a matching row.
+func (s *Store) RecordFirstCopyReceipt(gameID, txID, peerID, generationID, digest string) error {
+	if gameID == "" || txID == "" || peerID == "" || digest == "" {
+		return fmt.Errorf("first-copy receipt is incomplete")
+	}
+	_, err := s.db.Exec(`INSERT INTO game_first_copy_receipts (game_id, tx_id, peer_id, generation_id, digest) VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(game_id, tx_id, peer_id) DO UPDATE SET generation_id = excluded.generation_id, digest = excluded.digest`,
+		gameID, txID, peerID, generationID, digest)
+	return err
 }
 
 func txHeld(tx rowQuery, gameID string) (bool, error) {
@@ -240,6 +417,15 @@ func (s *Store) AbortFirstCopy(gameID, txID string) error {
 	}
 	if n != 1 {
 		return fmt.Errorf("first-copy changed during abort")
+	}
+	if row.GenerationID != "" {
+		res, err := tx.Exec(`UPDATE snapshots SET pinned = 0 WHERE id = ?`, row.GenerationID)
+		if err != nil {
+			return err
+		}
+		if n, err := res.RowsAffected(); err != nil || n != 1 {
+			return fmt.Errorf("first-copy generation could not be released")
+		}
 	}
 	return tx.Commit()
 }
@@ -357,6 +543,14 @@ func (s *Store) OpenFirstCopy(gameID, txID string) error {
 	if held {
 		return fmt.Errorf("first-copy open refused: provisioning hold unexpectedly remains")
 	}
+	var receipts int
+	if err := tx.Get(&receipts, `SELECT COUNT(*) FROM game_first_copy_receipts WHERE game_id = ? AND tx_id = ? AND peer_id = ? AND generation_id = ? AND digest = ?`,
+		gameID, txID, row.PeerID, row.GenerationID, row.ContentHash); err != nil {
+		return err
+	}
+	if receipts != 1 {
+		return fmt.Errorf("first-copy open refused: named peer has not acknowledged this generation")
+	}
 	res, err := tx.Exec(`DELETE FROM game_first_copies WHERE game_id = ? AND tx_id = ? AND phase = ?`, gameID, txID, FirstCopyActivated)
 	if err != nil {
 		return err
@@ -367,6 +561,15 @@ func (s *Store) OpenFirstCopy(gameID, txID string) error {
 	}
 	if n != 1 {
 		return fmt.Errorf("first-copy changed during open")
+	}
+	if row.GenerationID != "" {
+		res, err := tx.Exec(`UPDATE snapshots SET pinned = 0 WHERE id = ?`, row.GenerationID)
+		if err != nil {
+			return err
+		}
+		if n, err := res.RowsAffected(); err != nil || n != 1 {
+			return fmt.Errorf("first-copy generation could not be released")
+		}
 	}
 	return tx.Commit()
 }

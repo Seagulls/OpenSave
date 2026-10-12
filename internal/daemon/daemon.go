@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -1006,37 +1005,69 @@ func (d *Daemon) ReleaseProvisioningMode(gameID string, enableAutoSync bool) (bo
 }
 
 func (d *Daemon) firstCopyDigest(game store.Game) (string, error) {
-	primary, err := delta.BuildManifest(game.SavePath)
+	roots, err := d.Store.GameRootPaths(game.ID)
 	if err != nil {
 		return "", err
 	}
-	parts := []string{"primary:" + primary.ManifestHash()}
-	roots, err := d.Store.ListGameRoots(game.ID)
-	if err != nil {
-		return "", err
-	}
-	sort.Slice(roots, func(i, j int) bool { return roots[i].Name < roots[j].Name })
-	for _, root := range roots {
-		manifest, err := delta.BuildManifest(root.Path)
-		if err != nil {
-			return "", err
-		}
-		parts = append(parts, root.Name+":"+manifest.ManifestHash())
-	}
-	return strings.Join(parts, "\n"), nil
+	return snapshot.FirstCopySourceDigest(game.SavePath, roots)
 }
 
-// BeginFirstCopy arms a held game. The digest is the save as it is now.
+// BeginFirstCopy arms a held game. A source is captured and certified before
+// its snapshot pin and lease are committed together. Retrying an existing
+// source transaction renews that exact generation; it never snapshots newer
+// live files under the old transfer.
 func (d *Daemon) BeginFirstCopy(gameID, role, peerID string, ttl time.Duration) (store.FirstCopy, error) {
 	game, err := d.Store.GetGame(gameID)
 	if err != nil {
 		return store.FirstCopy{}, err
 	}
+	if role == store.FirstCopySource {
+		existing, err := d.Store.RecordedFirstCopy(gameID)
+		if err != nil {
+			return store.FirstCopy{}, err
+		}
+		if existing != nil && existing.GenerationID != "" {
+			if existing.Role != role || existing.PeerID != peerID {
+				return store.FirstCopy{}, fmt.Errorf("first-copy for %s is already bound to %s as %s", gameID, existing.PeerID, existing.Role)
+			}
+			snap, err := d.Store.GetSnapshot(existing.GenerationID)
+			if err != nil || snap.GameID != gameID || snap.BranchName != existing.GenerationBranch {
+				return store.FirstCopy{}, fmt.Errorf("first-copy generation ownership is inconsistent")
+			}
+			gen, err := snapshot.GenerationManifest(snap.ZipPath)
+			gen = snapshot.TransferableGeneration(gen)
+			if err != nil || gen.Digest != existing.ContentHash {
+				return store.FirstCopy{}, fmt.Errorf("first-copy generation is missing or damaged")
+			}
+			return d.Store.RearmFirstCopy(gameID, role, peerID, ttl)
+		}
+
+		snap, gen, err := d.Snapshots.CreateFirstCopyGeneration(gameID)
+		if err != nil {
+			return store.FirstCopy{}, err
+		}
+		row, used, bindErr := d.Store.BeginFirstCopySource(gameID, peerID, ttl, snap, gen.Digest)
+		if bindErr != nil || !used {
+			_, _ = d.Snapshots.DeleteSnapshot(gameID, snap.ID)
+		}
+		if bindErr != nil {
+			return store.FirstCopy{}, bindErr
+		}
+		return row, nil
+	}
+
 	digest, err := d.firstCopyDigest(game)
 	if err != nil {
 		return store.FirstCopy{}, err
 	}
-	return d.Store.BeginFirstCopy(gameID, role, peerID, digest, ttl)
+	row, err := d.Store.BeginFirstCopy(gameID, role, peerID, digest, ttl)
+	return row, err
+}
+
+// AbortFirstCopy atomically removes a copying lease and releases its
+// generation pin. An activated fence is still refused by the store.
+func (d *Daemon) AbortFirstCopy(gameID, txID string) error {
+	return d.Store.AbortFirstCopy(gameID, txID)
 }
 
 // FinishFirstCopy checks the save still matches and marks the lease verified.
@@ -1061,6 +1092,18 @@ func (d *Daemon) FinishFirstCopy(gameID, txID, expectHash string) (store.FirstCo
 	}
 	if lease.Role == store.FirstCopyTarget && digest != expectHash {
 		return store.FirstCopy{}, fmt.Errorf("target digest does not match the source")
+	}
+	if lease.Role == store.FirstCopySource && lease.GenerationID != "" {
+		snap, err := d.Store.GetSnapshot(lease.GenerationID)
+		if err != nil {
+			return store.FirstCopy{}, fmt.Errorf("first-copy generation is missing: %w", err)
+		}
+		gen, err := snapshot.GenerationManifest(snap.ZipPath)
+		gen = snapshot.TransferableGeneration(gen)
+		if err != nil || gen.Digest != lease.ContentHash || snap.BranchName != lease.GenerationBranch {
+			return store.FirstCopy{}, fmt.Errorf("first-copy generation archive is missing or damaged")
+		}
+		digest = lease.ContentHash
 	}
 	if lease.Role == store.FirstCopySource && expectHash != "" && expectHash != digest {
 		return store.FirstCopy{}, fmt.Errorf("source digest does not match the caller")

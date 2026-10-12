@@ -31,8 +31,8 @@ type Snapshot struct {
 // CreateSnapshot inserts a new snapshot record.
 func (s *Store) CreateSnapshot(snap Snapshot) error {
 	_, err := s.db.NamedExec(`
-		INSERT INTO snapshots (id, game_id, branch_name, timestamp, comment, is_system_auto, zip_path, size_bytes)
-		VALUES (:id, :game_id, :branch_name, :timestamp, :comment, :is_system_auto, :zip_path, :size_bytes)`,
+		INSERT INTO snapshots (id, game_id, branch_name, timestamp, comment, is_system_auto, zip_path, size_bytes, pinned)
+		VALUES (:id, :game_id, :branch_name, :timestamp, :comment, :is_system_auto, :zip_path, :size_bytes, :pinned)`,
 		snap)
 	if err != nil {
 		return fmt.Errorf("create snapshot %s: %w", snap.ID, err)

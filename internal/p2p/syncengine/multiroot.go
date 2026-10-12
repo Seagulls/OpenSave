@@ -207,6 +207,7 @@ func (e *Engine) syncOneRoot(ctx context.Context, gameID string, game store.Game
 		Manifest:     remote,
 		ActiveBranch: remoteData.ActiveBranch,
 		Proto:        remoteData.Proto,
+		FirstCopy:    remoteData.FirstCopy,
 	}
 
 	if emptiedUnconfirmed(remote.Files, decision, remoteData.DeletionConfirmed) {

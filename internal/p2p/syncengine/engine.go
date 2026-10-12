@@ -1734,7 +1734,9 @@ func (e *Engine) pullFiles(ctx context.Context, peer Peer, gameID string, game s
 		if isFile, _ := delta.ResolveLocalSaveFilePath(root.Path); isFile {
 			localFilePath = root.Path // single-file save mode
 		}
-		if err := e.pullFile(ctx, peer, FileRef{GameID: gameID, Root: root.Name, RelPath: relPath}, localFilePath,
+		if err := e.pullFile(ctx, peer, FileRef{
+			GameID: gameID, Root: root.Name, RelPath: relPath, Generation: remoteData.FirstCopy,
+		}, localFilePath,
 			remoteFile, indices, throttle, tracker, reportProgress); err != nil {
 			return err
 		}

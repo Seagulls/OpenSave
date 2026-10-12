@@ -101,6 +101,13 @@ type Engine struct {
 	nonceOnce  sync.Once
 	nonceCache *nonceCache
 
+	// Certified first-copy archives, keyed by immutable generation ID.
+	// Requests still stat the archive and each returned block is checked
+	// against this manifest; the cache avoids hashing a large archive for
+	// every block batch.
+	generationMu    sync.Mutex
+	generationCache map[string]sourceGenerationView
+
 	// Goodbyes still owed to devices this one unpaired; see farewell.go.
 	farewellMu sync.Mutex
 	farewells  map[string]*farewell

@@ -31,11 +31,26 @@ type SnapshotInfo struct {
 // with more than one save location.
 const ProtoMultiRoot = 1
 
+// FirstCopyGenerationProtocol is the revision that binds every block request
+// to the immutable, full multi-root generation advertised by the manifest.
+const FirstCopyGenerationProtocol = 2
+
+// FirstCopyGeneration identifies the exact source archive a fenced transfer
+// is allowed to read.
+type FirstCopyGeneration struct {
+	Protocol int    `json:"protocol"`
+	TxID     string `json:"txId"`
+	ID       string `json:"id"`
+	Digest   string `json:"digest"`
+	Branch   string `json:"branch"`
+}
+
 // ManifestResponse is what a peer returns for a manifest request.
 type ManifestResponse struct {
-	Manifest       delta.Manifest `json:"manifest"`
-	ActiveBranch   string         `json:"activeBranch"`
-	LatestSnapshot *SnapshotInfo  `json:"latestSnapshot"`
+	Manifest       delta.Manifest       `json:"manifest"`
+	ActiveBranch   string               `json:"activeBranch"`
+	LatestSnapshot *SnapshotInfo        `json:"latestSnapshot"`
+	FirstCopy      *FirstCopyGeneration `json:"firstCopyGeneration,omitempty"`
 
 	// Proto is the responder's sync protocol revision, absent (zero) on every
 	// build that predates it.
@@ -69,6 +84,9 @@ type FileRef struct {
 	// Root is the save location's name; empty means the primary one.
 	Root    string
 	RelPath string
+	// Generation is required for fenced first-copy reads. Ordinary syncs
+	// leave it nil.
+	Generation *FirstCopyGeneration
 }
 
 // ManifestQuery carries the game metadata that lets the remote side
