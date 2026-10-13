@@ -26,17 +26,18 @@ type wanTransport struct {
 // game calls its slots. Found by watching the wire from a third socket; the
 // save data itself was sealed, and this was sitting next to it in the clear.
 type manifestRequestBody struct {
-	Name     string `json:"name,omitempty"`
-	SavePath string `json:"savePath,omitempty"`
-	IsFile   bool   `json:"isFile"`
-	AppID    string `json:"appId,omitempty"`
-	CoverURL string `json:"coverUrl,omitempty"`
+	Name          string `json:"name,omitempty"`
+	SavePath      string `json:"savePath,omitempty"`
+	IsFile        bool   `json:"isFile"`
+	AppID         string `json:"appId,omitempty"`
+	CoverURL      string `json:"coverUrl,omitempty"`
+	PairLiveEpoch string `json:"pairLiveEpoch,omitempty"`
 }
 
 func (t *wanTransport) FetchManifest(ctx context.Context, peer syncengine.Peer, gameID string, q syncengine.ManifestQuery) (syncengine.ManifestResponse, error) {
 	body := manifestRequestBody{
 		Name: q.Name, SavePath: q.SavePath, IsFile: q.IsFile,
-		AppID: q.AppID, CoverURL: q.CoverURL,
+		AppID: q.AppID, CoverURL: q.CoverURL, PairLiveEpoch: q.PairLiveEpoch,
 	}
 	raw, err := t.wan.Request(ctx, peer.ID, "/manifest/"+gameID, "GET", body)
 	if err != nil {
@@ -72,7 +73,7 @@ func (t *wanTransport) FetchBlocks(ctx context.Context, peer syncengine.Peer, re
 	}
 
 	raw, err := t.wan.Request(ctx, peer.ID, "/blocks/"+ref.GameID, "POST", map[string]any{
-		"relPath": ref.RelPath, "root": ref.Root, "generation": ref.Generation,
+		"relPath": ref.RelPath, "root": ref.Root, "generation": ref.Generation, "pairLiveEpoch": ref.PairLiveEpoch,
 		"blockIndices": blockIndices, "blockSize": blockSize,
 		// Peers that don't understand this ignore it and reply with raw
 		// blocks, which decodeBlocks passes straight through.
@@ -91,7 +92,7 @@ func (t *wanTransport) FetchBlocks(ctx context.Context, peer syncengine.Peer, re
 }
 
 func (t *wanTransport) DeleteRemote(ctx context.Context, peer syncengine.Peer, ref syncengine.FileRef) error {
-	_, err := t.wan.Request(ctx, peer.ID, "/delete-file/"+ref.GameID, "POST", map[string]any{"relPath": ref.RelPath, "root": ref.Root})
+	_, err := t.wan.Request(ctx, peer.ID, "/delete-file/"+ref.GameID, "POST", map[string]any{"relPath": ref.RelPath, "root": ref.Root, "pairLiveEpoch": ref.PairLiveEpoch})
 	return err
 }
 
@@ -101,8 +102,12 @@ func (t *wanTransport) DeleteRemote(ctx context.Context, peer syncengine.Peer, r
 // side refuses an unsigned request from a peer that has authenticated before.
 // Built by hand it carried no MAC, so it was dropped on arrival and the push
 // only landed when the peer's own periodic reconcile came round.
-func (t *wanTransport) TriggerPeerPull(peer syncengine.Peer, gameID string) {
-	t.wan.Notify(peer.ID, "/sync/trigger/"+gameID, "GET", nil)
+func (t *wanTransport) TriggerPeerPull(peer syncengine.Peer, gameID string, epoch ...string) {
+	if len(epoch) > 0 && epoch[0] != "" {
+		t.wan.Notify(peer.ID, "/sync/trigger/"+gameID, "GET", map[string]string{"pairLiveEpoch": epoch[0]})
+	} else {
+		t.wan.Notify(peer.ID, "/sync/trigger/"+gameID, "GET", nil)
+	}
 }
 
 // ReportSyncEvent tells a peer how a sync it is involved in is going.
@@ -170,8 +175,8 @@ func (t *routingTransport) DeleteRemote(ctx context.Context, peer syncengine.Pee
 	return t.pick(peer).DeleteRemote(ctx, peer, ref)
 }
 
-func (t *routingTransport) TriggerPeerPull(peer syncengine.Peer, gameID string) {
-	t.pick(peer).TriggerPeerPull(peer, gameID)
+func (t *routingTransport) TriggerPeerPull(peer syncengine.Peer, gameID string, epoch ...string) {
+	t.pick(peer).TriggerPeerPull(peer, gameID, epoch...)
 }
 
 func (t *routingTransport) ReportSyncEvent(peer syncengine.Peer, gameID, eventType string, data map[string]any) {

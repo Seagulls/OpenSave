@@ -138,6 +138,9 @@ func appendChain(chain []string, snapID string) []string {
 // taken. Only a snapshot of the save as it stands moves it; a copy kept
 // before replacing a save is history, not this device's save.
 func (d *Daemon) noteSnapshotForCloud(snap store.Snapshot, current bool) {
+	if guard, err := d.Store.PairGuardForServe(snap.GameID); err != nil || guard != nil {
+		return
+	}
 	if !current {
 		return
 	}
@@ -608,6 +611,9 @@ func (d *Daemon) pruneOwnHeads(files []cloud.CloudFile) {
 // device's save. The save it replaces is kept first, as every restore keeps
 // it.
 func (d *Daemon) pullFromCloud(game store.Game, fileName, deviceName string) error {
+	if guard, err := d.Store.PairGuardForServe(game.ID); err != nil || guard != nil {
+		return fmt.Errorf("protected pair cannot pull from cloud")
+	}
 	_, branch, snapID, ok := snapshot.ParseExportEntryName(fileName)
 	if !ok {
 		return fmt.Errorf("%q is not a snapshot", fileName)
@@ -633,6 +639,9 @@ func (d *Daemon) pullFromCloud(game store.Game, fileName, deviceName string) err
 	}
 	// Another device's save: the files this device keeps for itself stay
 	// its own. See Manager.RestoreKeeping.
+	if guard, err := d.Store.PairGuardForServe(game.ID); err != nil || guard != nil {
+		return fmt.Errorf("protected first-copy game cannot restore cloud offer")
+	}
 	if _, err := d.Snapshots.RestoreKeeping(game.ID, snapID, ignore.Parse(game.SyncIgnore)); err != nil {
 		return err
 	}

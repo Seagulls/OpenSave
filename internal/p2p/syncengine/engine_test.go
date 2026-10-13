@@ -115,7 +115,7 @@ func (f *fakeTransport) DeleteRemote(ctx context.Context, peer Peer, ref FileRef
 	return os.RemoveAll(full)
 }
 
-func (f *fakeTransport) TriggerPeerPull(peer Peer, gameID string) {
+func (f *fakeTransport) TriggerPeerPull(peer Peer, gameID string, epoch ...string) {
 	f.mu.Lock()
 	f.pullTriggers++
 	cb := f.onTriggerPull

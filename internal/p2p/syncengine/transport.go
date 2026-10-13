@@ -51,6 +51,7 @@ type ManifestResponse struct {
 	ActiveBranch   string               `json:"activeBranch"`
 	LatestSnapshot *SnapshotInfo        `json:"latestSnapshot"`
 	FirstCopy      *FirstCopyGeneration `json:"firstCopyGeneration,omitempty"`
+	PairLiveEpoch  string               `json:"pairLiveEpoch,omitempty"`
 
 	// Proto is the responder's sync protocol revision, absent (zero) on every
 	// build that predates it.
@@ -86,7 +87,8 @@ type FileRef struct {
 	RelPath string
 	// Generation is required for fenced first-copy reads. Ordinary syncs
 	// leave it nil.
-	Generation *FirstCopyGeneration
+	Generation    *FirstCopyGeneration
+	PairLiveEpoch string
 }
 
 // ManifestQuery carries the game metadata that lets the remote side
@@ -97,8 +99,9 @@ type ManifestQuery struct {
 	IsFile   bool
 	// AppID and CoverURL let a peer that auto-tracks this game show the same
 	// cover art, instead of a blank tile.
-	AppID    string
-	CoverURL string
+	AppID         string
+	CoverURL      string
+	PairLiveEpoch string
 }
 
 // BlockData is one fetched block.
@@ -122,7 +125,7 @@ type Transport interface {
 	FetchManifest(ctx context.Context, peer Peer, gameID string, q ManifestQuery) (ManifestResponse, error)
 	FetchBlocks(ctx context.Context, peer Peer, ref FileRef, blockIndices []int, blockSize int) ([]BlockData, error)
 	DeleteRemote(ctx context.Context, peer Peer, ref FileRef) error
-	TriggerPeerPull(peer Peer, gameID string)
+	TriggerPeerPull(peer Peer, gameID string, epoch ...string)
 	// ReportSyncEvent is fire-and-forget progress reporting to the peer.
 	ReportSyncEvent(peer Peer, gameID, eventType string, data map[string]any)
 }

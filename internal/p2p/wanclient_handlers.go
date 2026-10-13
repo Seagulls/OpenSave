@@ -379,6 +379,7 @@ func (w *WanClient) routeRequest(ctx context.Context, msg RelayMessage) (int, an
 		strings.HasPrefix(route, "/first-copy/handover/prepare/") ||
 		strings.HasPrefix(route, "/first-copy/handover/decision/") ||
 		strings.HasPrefix(route, "/first-copy/handover/finalize/") ||
+		strings.HasPrefix(route, "/first-copy/pair-live/ready/") ||
 		route == "/games" ||
 		route == "/unpair" ||
 		route == "/untrack" ||
@@ -604,6 +605,20 @@ func (w *WanClient) routeRequest(ctx context.Context, msg RelayMessage) (int, an
 		}
 		return 200, map[string]any{"accepted": true, "fenceActive": true, "openAuthorized": false, "autoSync": false}
 
+	case strings.HasPrefix(route, "/first-copy/pair-live/ready/"):
+		if msg.Method != "POST" || len(msg.Body) > 32768 {
+			return 400, map[string]string{"error": "invalid pair-live readiness"}
+		}
+		var ready store.PairLiveReadyMessage
+		if err := json.Unmarshal(msg.Body, &ready); err != nil {
+			return 400, map[string]string{"error": "malformed pair-live readiness"}
+		}
+		gameID := strings.TrimPrefix(route, "/first-copy/pair-live/ready/")
+		if err := w.engine.acceptPairLiveReady(gameID, from, msg.Nonce, ready); err != nil {
+			return 409, map[string]string{"error": err.Error()}
+		}
+		return 200, map[string]any{"accepted": true, "fenceActive": true, "nativePairSyncEnabled": false, "autoSync": false}
+
 	case strings.HasPrefix(route, "/sync/event/"):
 		// routeRequest already verified the pairing MAC, timestamp and nonce;
 		// a bare relay notification never enters this handler.
@@ -619,7 +634,7 @@ func (w *WanClient) routeRequest(ctx context.Context, msg RelayMessage) (int, an
 			return 400, map[string]string{"error": "invalid convergence event"}
 		}
 		gameID := strings.TrimPrefix(route, "/sync/event/")
-		canonical, err := w.engine.syncEventGame(gameID, from)
+		canonical, err := w.engine.syncEventGame(gameID, from, epochFromEvent(event.Data))
 		if err != nil {
 			return 409, map[string]string{"error": err.Error()}
 		}
@@ -634,7 +649,7 @@ func (w *WanClient) routeRequest(ctx context.Context, msg RelayMessage) (int, an
 			go func() {
 				refreshCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 				defer cancel()
-				w.engine.Sync.ConfirmInSync(refreshCtx, canonical, sp, claimedHash)
+				w.engine.Sync.ConfirmInSync(syncengine.WithPairLiveEpoch(refreshCtx, epochFromEvent(event.Data)), canonical, sp, claimedHash)
 			}()
 		}
 		return 200, map[string]any{"success": true}
@@ -659,7 +674,13 @@ func (w *WanClient) routeRequest(ctx context.Context, msg RelayMessage) (int, an
 
 	case strings.HasPrefix(route, "/sync/trigger/"):
 		gameID := route[strings.LastIndex(route, "/")+1:]
-		if stop, status, msg := w.engine.peerGameAccess(gameID, msg.From, false); stop {
+		var claim struct {
+			PairLiveEpoch string `json:"pairLiveEpoch"`
+		}
+		if len(msg.Body) > 0 && json.Unmarshal(msg.Body, &claim) != nil {
+			return 400, map[string]string{"error": "invalid sync trigger"}
+		}
+		if stop, status, msg := w.engine.peerGameAccess(gameID, msg.From, false, claim.PairLiveEpoch); stop {
 			return status, map[string]string{"error": msg}
 		}
 		w.engine.GoSync(func(ctx context.Context) {
@@ -690,30 +711,38 @@ func (w *WanClient) serveManifest(route string, body json.RawMessage, peerID str
 	// read when the body carries nothing — the body is the thing this side
 	// unsealed, so it is trusted first.
 	query := manifestQueryFromURL(u.Query())
+	liveEpoch := u.Query().Get("pairLiveEpoch")
 	if len(body) > 0 {
 		var b struct {
-			Name     string `json:"name"`
-			SavePath string `json:"savePath"`
-			IsFile   bool   `json:"isFile"`
-			AppID    string `json:"appId"`
-			CoverURL string `json:"coverUrl"`
+			Name          string `json:"name"`
+			SavePath      string `json:"savePath"`
+			IsFile        bool   `json:"isFile"`
+			AppID         string `json:"appId"`
+			CoverURL      string `json:"coverUrl"`
+			PairLiveEpoch string `json:"pairLiveEpoch"`
 		}
 		if json.Unmarshal(body, &b) == nil && (b.Name != "" || b.SavePath != "") {
 			query = manifestGameQuery{Name: b.Name, SavePath: b.SavePath, IsFile: b.IsFile, AppID: b.AppID, CoverURL: b.CoverURL}
+			liveEpoch = b.PairLiveEpoch
 		}
 	}
 
 	// Same auto-track + cover-backfill behavior as the LAN route — relay
 	// peers were previously auto-tracked without cover art, which is why
 	// covers didn't propagate between WAN-paired devices.
-	game, err := w.engine.ensureManifestGame(gameID, query, peerID)
+	var game store.Game
+	if liveEpoch != "" {
+		game, err = w.engine.trackedGameForPeer(gameID)
+	} else {
+		game, err = w.engine.ensureManifestGame(gameID, query, peerID)
+	}
 	if err != nil {
 		return 404, map[string]string{"error": err.Error()}
 	}
 	if w.engine.holdingBack(game) {
 		return 404, map[string]string{"error": syncengine.HeldMessage}
 	}
-	if stop, status, msg := w.engine.peerGameAccess(game.ID, peerID, true); stop {
+	if stop, status, msg := w.engine.peerGameAccess(game.ID, peerID, true, liveEpoch); stop {
 		return status, map[string]string{"error": msg}
 	}
 	// As on the LAN: a save a sync here is writing is not described
@@ -727,7 +756,7 @@ func (w *WanClient) serveManifest(route string, body json.RawMessage, peerID str
 
 	var manifest delta.Manifest
 	var generation *syncengine.FirstCopyGeneration
-	if view, pinned, genErr := w.engine.sourceGeneration(game.ID); genErr != nil {
+	if view, pinned, genErr := w.engine.sourceGenerationForMode(game.ID, liveEpoch); genErr != nil {
 		return 409, map[string]string{"error": "first-copy generation is missing or damaged"}
 	} else if pinned {
 		manifest = view.value.Manifest
@@ -740,6 +769,9 @@ func (w *WanClient) serveManifest(route string, body json.RawMessage, peerID str
 		}
 		var failures map[string]error
 		manifest, failures, err = delta.BuildMultiManifest(game.SavePath, extra)
+		if liveEpoch != "" && (err != nil || len(failures) > 0 || len(manifest.Extra) != len(extra)) {
+			return 503, map[string]string{"error": "pair-live requires complete named root set"}
+		}
 		if err != nil {
 			return 500, map[string]string{"error": err.Error()}
 		}
@@ -750,7 +782,7 @@ func (w *WanClient) serveManifest(route string, body json.RawMessage, peerID str
 	w.engine.Sync.NoteServed(game.ID, peerID, manifest) // syncengine/served.go
 	resp := map[string]any{
 		"gameId": gameID, "activeBranch": game.ActiveBranch, "manifest": manifest,
-		"proto": ServedProto(), "firstCopyGeneration": generation,
+		"proto": ServedProto(), "firstCopyGeneration": generation, "pairLiveEpoch": liveEpoch,
 		"deletionConfirmed": w.engine.Sync.DeletionConfirmed(game.ID),
 	}
 	if latest, err := w.engine.Snapshots.LatestSnapshot(gameID, ""); err == nil {
@@ -764,12 +796,13 @@ func (w *WanClient) serveManifest(route string, body json.RawMessage, peerID str
 func (w *WanClient) serveBlocks(route string, rawBody json.RawMessage, fromPeerID string) (int, any) {
 	gameID := route[strings.LastIndex(route, "/")+1:]
 	var body struct {
-		RelPath      string                          `json:"relPath"`
-		Root         string                          `json:"root"`
-		Generation   *syncengine.FirstCopyGeneration `json:"generation"`
-		BlockIndices []int                           `json:"blockIndices"`
-		BlockSize    int                             `json:"blockSize"`
-		Encodings    []string                        `json:"encodings"`
+		RelPath       string                          `json:"relPath"`
+		Root          string                          `json:"root"`
+		Generation    *syncengine.FirstCopyGeneration `json:"generation"`
+		PairLiveEpoch string                          `json:"pairLiveEpoch"`
+		BlockIndices  []int                           `json:"blockIndices"`
+		BlockSize     int                             `json:"blockSize"`
+		Encodings     []string                        `json:"encodings"`
 	}
 	if err := json.Unmarshal(rawBody, &body); err != nil || body.RelPath == "" {
 		return 400, map[string]string{"error": "relPath is required"}
@@ -779,10 +812,13 @@ func (w *WanClient) serveBlocks(route string, rawBody json.RawMessage, fromPeerI
 	if err != nil {
 		return 404, map[string]string{"error": "Game not found."}
 	}
-	if stop, status, msg := w.engine.peerGameAccess(game.ID, fromPeerID, true); stop {
+	if body.PairLiveEpoch != "" && body.Generation != nil {
+		return 409, map[string]string{"error": "cannot combine pinned and live mode"}
+	}
+	if stop, status, msg := w.engine.peerGameAccess(game.ID, fromPeerID, true, body.PairLiveEpoch); stop {
 		return status, map[string]string{"error": msg}
 	}
-	if view, pinned, genErr := w.engine.sourceGeneration(game.ID); genErr != nil {
+	if view, pinned, genErr := w.engine.sourceGenerationForMode(game.ID, body.PairLiveEpoch); genErr != nil {
 		return 409, map[string]string{"error": "first-copy generation is missing or damaged"}
 	} else if pinned {
 		if !view.matches(body.Generation) {
@@ -842,7 +878,9 @@ func (w *WanClient) serveBlocks(route string, rawBody json.RawMessage, fromPeerI
 func (w *WanClient) serveDeleteFile(route string, rawBody json.RawMessage, fromPeerID string) (int, any) {
 	gameID := route[strings.LastIndex(route, "/")+1:]
 	var body struct {
-		RelPath string `json:"relPath"`
+		RelPath       string `json:"relPath"`
+		Root          string `json:"root"`
+		PairLiveEpoch string `json:"pairLiveEpoch"`
 	}
 	if err := json.Unmarshal(rawBody, &body); err != nil || body.RelPath == "" {
 		return 400, map[string]string{"error": "relPath is required."}
@@ -851,17 +889,21 @@ func (w *WanClient) serveDeleteFile(route string, rawBody json.RawMessage, fromP
 	if err != nil {
 		return 404, map[string]string{"error": "Game not found."}
 	}
-	if stop, status, msg := w.engine.peerGameAccess(game.ID, fromPeerID, false); stop {
+	if stop, status, msg := w.engine.peerGameAccess(game.ID, fromPeerID, false, body.PairLiveEpoch); stop {
 		return status, map[string]string{"error": msg}
 	}
-	if !delta.IsSafePath(game.SavePath, body.RelPath) {
+	base, ok := w.engine.resolveServeRoot(gameID, game, body.Root)
+	if !ok {
+		return 404, map[string]string{"error": "unknown save location"}
+	}
+	if !delta.IsSafePath(base, body.RelPath) {
 		return 403, map[string]string{"error": "invalid path"}
 	}
 	// Resolved, not joined: this device's manifest advertises the agreed
 	// (composed) spelling, while the file on this disk may be stored
 	// decomposed — a macOS save. Joining the key verbatim would fail to
 	// find the very file this device just offered.
-	full := delta.LocalNameFor(game.SavePath, body.RelPath)
+	full := delta.LocalNameFor(base, body.RelPath)
 	_ = os.Chmod(full, 0o666)
 	deleting := time.Now()
 	// Remembered as on the LAN route (syncengine/peerdeleted.go).
@@ -872,7 +914,7 @@ func (w *WanClient) serveDeleteFile(route string, rawBody json.RawMessage, fromP
 	}
 	if os.Remove(full) == nil {
 		if statErr == nil && (info.IsDir() || entry.Hash != "") {
-			w.engine.Sync.NotePeerDeletion(game.ID, "", body.RelPath, entry, info.IsDir())
+			w.engine.Sync.NotePeerDeletion(game.ID, body.Root, body.RelPath, entry, info.IsDir())
 		}
 		asker := "another device"
 		if peer, err := w.engine.Store.GetPeer(fromPeerID); err == nil {

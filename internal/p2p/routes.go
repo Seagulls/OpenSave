@@ -46,6 +46,7 @@ func (e *Engine) RegisterRoutes(r chi.Router) {
 		r.Post("/api/p2p/first-copy/handover/prepare/{gameId}", e.handleFirstCopyHandoverPrepare)
 		r.Post("/api/p2p/first-copy/handover/decision/{gameId}", e.handleFirstCopyDecision)
 		r.Post("/api/p2p/first-copy/handover/finalize/{gameId}", e.handleFirstCopyFinalize)
+		r.Post("/api/p2p/first-copy/pair-live/ready/{gameId}", e.handlePairLiveReady)
 		r.Get("/api/p2p/app-binary", e.handleAppBinary)
 
 		// What moves save data, or starts a sync: refused while paused.
@@ -89,7 +90,8 @@ func (e *Engine) requirePairedPeer(next http.Handler) http.Handler {
 		if strings.HasPrefix(r.URL.Path, "/api/p2p/first-copy/receipt/") ||
 			strings.HasPrefix(r.URL.Path, "/api/p2p/first-copy/handover/prepare/") ||
 			strings.HasPrefix(r.URL.Path, "/api/p2p/first-copy/handover/decision/") ||
-			strings.HasPrefix(r.URL.Path, "/api/p2p/first-copy/handover/finalize/") {
+			strings.HasPrefix(r.URL.Path, "/api/p2p/first-copy/handover/finalize/") ||
+			strings.HasPrefix(r.URL.Path, "/api/p2p/first-copy/pair-live/ready/") {
 			r.Body = http.MaxBytesReader(w, r.Body, 32768)
 		}
 		ip := clientIP(r)
@@ -391,6 +393,10 @@ func (e *Engine) PeerGameList() ([]PeerGame, error) {
 		// A game still being configured is not offered for linking. Linking
 		// would publish its id, and the peer would then ask for its saves.
 		if _, skip := held[g.ID]; skip {
+			continue
+		}
+		pair, err := e.Store.PairGuardForServe(g.ID)
+		if err != nil || pair != nil {
 			continue
 		}
 		out = append(out, PeerGame{ID: g.ID, Name: g.Name, SavePath: g.SavePath, AppID: g.AppID})
@@ -706,7 +712,21 @@ func (e *Engine) handleManifest(w http.ResponseWriter, r *http.Request) {
 	if peer, ok := e.peerByAddress(clientIP(r)); ok {
 		askingPeer = peer.ID
 	}
-	game, err := e.ensureManifestGame(gameID, manifestQueryFromURL(r.URL.Query()), askingPeer)
+	epoch := r.URL.Query().Get("pairLiveEpoch")
+	if epoch != "" {
+		askingPeer = signedLANPeerID(r)
+		if askingPeer == "" {
+			jsonError(w, http.StatusUnauthorized, "authenticated live peer required")
+			return
+		}
+	}
+	var game store.Game
+	var err error
+	if epoch != "" {
+		game, err = e.trackedGameForPeer(gameID)
+	} else {
+		game, err = e.ensureManifestGame(gameID, manifestQueryFromURL(r.URL.Query()), askingPeer)
+	}
 	if err != nil {
 		jsonError(w, http.StatusNotFound, err.Error())
 		return
@@ -715,7 +735,7 @@ func (e *Engine) handleManifest(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusNotFound, syncengine.HeldMessage)
 		return
 	}
-	if stop, status, msg := e.peerGameAccess(game.ID, lanPeerID(r), true); stop {
+	if stop, status, msg := e.peerGameAccess(game.ID, signedLANPeerID(r), true, epoch); stop {
 		jsonError(w, status, msg)
 		return
 	}
@@ -739,7 +759,7 @@ func (e *Engine) handleManifest(w http.ResponseWriter, r *http.Request) {
 	var manifest delta.Manifest
 	var generation *syncengine.FirstCopyGeneration
 	var failures map[string]error
-	if view, pinned, genErr := e.sourceGeneration(game.ID); genErr != nil {
+	if view, pinned, genErr := e.sourceGenerationForMode(game.ID, epoch); genErr != nil {
 		jsonError(w, http.StatusConflict, "first-copy generation is missing or damaged")
 		return
 	} else if pinned {
@@ -749,9 +769,17 @@ func (e *Engine) handleManifest(w http.ResponseWriter, r *http.Request) {
 	} else {
 		extra, rootsErr := e.Store.GameRootPaths(gameID)
 		if rootsErr != nil {
+			if epoch != "" {
+				jsonError(w, http.StatusServiceUnavailable, "pair-live root layout unavailable")
+				return
+			}
 			extra = nil
 		}
 		manifest, failures, err = delta.BuildMultiManifest(game.SavePath, extra)
+		if epoch != "" && (err != nil || len(failures) > 0 || len(manifest.Extra) != len(extra)) {
+			jsonError(w, http.StatusServiceUnavailable, "pair-live requires all named save roots available")
+			return
+		}
 	}
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, "manifest build failed: "+err.Error())
@@ -773,6 +801,7 @@ func (e *Engine) handleManifest(w http.ResponseWriter, r *http.Request) {
 		ActiveBranch:      game.ActiveBranch,
 		Proto:             ServedProto(),
 		FirstCopy:         generation,
+		PairLiveEpoch:     epoch,
 		DeletionConfirmed: e.Sync.DeletionConfirmed(game.ID),
 	}
 	if latest, err := e.Snapshots.LatestSnapshot(gameID, ""); err == nil {
@@ -798,11 +827,12 @@ func (e *Engine) handleBlocks(w http.ResponseWriter, r *http.Request) {
 		// Root names which save location the path is relative to. Absent on
 		// every peer that predates multi-root, which is why it is only ever
 		// sent to a peer that answered a manifest request with a proto.
-		Root         string                          `json:"root"`
-		Generation   *syncengine.FirstCopyGeneration `json:"generation"`
-		BlockIndices []int                           `json:"blockIndices"`
-		BlockSize    int                             `json:"blockSize"`
-		Encodings    []string                        `json:"encodings"`
+		Root          string                          `json:"root"`
+		Generation    *syncengine.FirstCopyGeneration `json:"generation"`
+		PairLiveEpoch string                          `json:"pairLiveEpoch"`
+		BlockIndices  []int                           `json:"blockIndices"`
+		BlockSize     int                             `json:"blockSize"`
+		Encodings     []string                        `json:"encodings"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.RelPath == "" {
 		jsonError(w, http.StatusBadRequest, "relPath is required")
@@ -814,11 +844,15 @@ func (e *Engine) handleBlocks(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusNotFound, "Game not found.")
 		return
 	}
-	if stop, status, msg := e.peerGameAccess(game.ID, lanPeerID(r), true); stop {
+	if (body.PairLiveEpoch != "" && body.Generation != nil) || (body.PairLiveEpoch != "" && signedLANPeerID(r) == "") {
+		jsonError(w, http.StatusConflict, "invalid pair-live block mode")
+		return
+	}
+	if stop, status, msg := e.peerGameAccess(game.ID, signedLANPeerID(r), true, body.PairLiveEpoch); stop {
 		jsonError(w, status, msg)
 		return
 	}
-	if view, pinned, genErr := e.sourceGeneration(game.ID); genErr != nil {
+	if view, pinned, genErr := e.sourceGenerationForMode(game.ID, body.PairLiveEpoch); genErr != nil {
 		jsonError(w, http.StatusConflict, "first-copy generation is missing or damaged")
 		return
 	} else if pinned {
@@ -881,8 +915,9 @@ func (e *Engine) handleBlocks(w http.ResponseWriter, r *http.Request) {
 func (e *Engine) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
 	gameID := chi.URLParam(r, "gameId")
 	var body struct {
-		RelPath string `json:"relPath"`
-		Root    string `json:"root"`
+		RelPath       string `json:"relPath"`
+		Root          string `json:"root"`
+		PairLiveEpoch string `json:"pairLiveEpoch"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.RelPath == "" {
 		jsonError(w, http.StatusBadRequest, "relPath is required.")
@@ -894,7 +929,11 @@ func (e *Engine) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusNotFound, "Game not found.")
 		return
 	}
-	if stop, status, msg := e.peerGameAccess(game.ID, lanPeerID(r), false); stop {
+	if body.PairLiveEpoch != "" && signedLANPeerID(r) == "" {
+		jsonError(w, http.StatusUnauthorized, "signed live deletion required")
+		return
+	}
+	if stop, status, msg := e.peerGameAccess(game.ID, signedLANPeerID(r), false, body.PairLiveEpoch); stop {
 		jsonError(w, status, msg)
 		return
 	}
@@ -1014,7 +1053,11 @@ func (e *Engine) handleSyncEvent(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var gateErr error
-		canonicalID, gateErr = e.syncEventGame(gameID, signedID)
+		var epoch string
+		if body.Data != nil {
+			epoch, _ = body.Data["pairLiveEpoch"].(string)
+		}
+		canonicalID, gateErr = e.syncEventGame(gameID, signedID, epoch)
 		if gateErr != nil {
 			jsonError(w, http.StatusConflict, gateErr.Error())
 			return
@@ -1048,7 +1091,7 @@ func (e *Engine) handleSyncEvent(w http.ResponseWriter, r *http.Request) {
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer cancel()
-			e.Sync.ConfirmInSync(ctx, canonicalID, signedPeer, claimedHash)
+			e.Sync.ConfirmInSync(syncengine.WithPairLiveEpoch(ctx, epochFromEvent(body.Data)), canonicalID, signedPeer, claimedHash)
 		}()
 	case "sync-error":
 		if e.Sync.Progress.OnSyncError != nil {
@@ -1077,7 +1120,7 @@ func (e *Engine) peerByAddress(ip string) (syncengine.Peer, bool) {
 // newer content for us to pull.
 func (e *Engine) handleSyncTrigger(w http.ResponseWriter, r *http.Request) {
 	gameID := chi.URLParam(r, "gameId")
-	if stop, status, msg := e.peerGameAccess(gameID, lanPeerID(r), false); stop {
+	if stop, status, msg := e.peerGameAccess(gameID, lanPeerID(r), false, r.URL.Query().Get("pairLiveEpoch")); stop {
 		jsonError(w, status, msg)
 		return
 	}
@@ -1158,15 +1201,32 @@ func SetServedProto(v int) int {
 // both sides, so the shared lineage is brought up to date. Until it is,
 // freshly-pushed files deliberately stay out of it (see persistLineage), so
 // deleting one here would pull it back instead of propagating the delete.
+func epochFromEvent(data map[string]any) string {
+	epoch, _ := data["pairLiveEpoch"].(string)
+	return epoch
+}
+
 func (e *Engine) peerFinishedPulling(gameID string, peer syncengine.Peer, data map[string]any) {
 	// Check again after transport dispatch: a hold/guard may have appeared
 	// since the request entered, and the SQLite write fence below handles
 	// the remaining race between this check and the actual persistence.
-	canonical, err := e.syncEventGame(gameID, peer.ID)
+	epoch := epochFromEvent(data)
+	canonical, err := e.syncEventGame(gameID, peer.ID, epoch)
 	if err != nil {
 		return
 	}
 	gameID = canonical
+	if epoch != "" {
+		// A protected game's metadata is written only after a fresh live manifest
+		// comparison inside decision-scoped SQLite transactions. The legacy
+		// immediate lineage shortcut has no epoch and must not bypass 0048.
+		go func() {
+			ctx, cancel := context.WithTimeout(syncengine.WithPairLiveEpoch(context.Background(), epoch), 2*time.Minute)
+			defer cancel()
+			e.Sync.RefreshLineage(ctx, gameID, peer)
+		}()
+		return
+	}
 	// Recorded first, and synchronously: the peer said exactly which files it
 	// wrote, so the lineage can be updated now rather than after a manifest
 	// round trip. That round trip is what left a window in which deleting a

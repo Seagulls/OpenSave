@@ -168,6 +168,7 @@ func New(opts Options) (*Daemon, error) {
 	d.P2P.OnRetrackRequest = d.retrackFromPeer
 	// A game tracked because a peer asked for it is set up as TrackGame would.
 	d.P2P.OnAutoTracked = d.adoptAutoTracked
+	d.P2P.OnPairLiveActivated = func(gameID string) { d.ResyncWatchers() }
 	// A Switch save a peer syncs goes into this device's own emulator profile.
 	d.P2P.SwitchSaveFolder = d.Scanner.SwitchSaveFolder
 	// What a game arriving from a peer may be tracked at without asking:
@@ -200,8 +201,14 @@ func New(opts Options) (*Daemon, error) {
 		// A game still being configured must not publish its snapshot. The
 		// name is gameID__branch__snapID.zip (cloudSnapshotName). Checked
 		// before the pause queue: a resume must not send it either.
-		if id, _, ok := strings.Cut(remoteFileName, "__"); ok && d.provisioningBlocks(id) {
-			return
+		if id, _, ok := strings.Cut(remoteFileName, "__"); ok {
+			if d.provisioningBlocks(id) {
+				return
+			}
+			guard, err := d.Store.PairGuardForServe(id)
+			if err != nil || guard != nil {
+				return
+			}
 		}
 		if d.P2P.Pause.Paused() {
 			d.holdUpload(zipPath, remoteFileName)
@@ -291,8 +298,18 @@ func (d *Daemon) Start() error {
 				_ = d.Store.UpdateGame(game)
 			}
 		}
-		if !game.AutoSync || d.provisioningBlocks(game.ID) {
+		if d.provisioningBlocks(game.ID) {
 			continue
+		}
+		if !game.AutoSync {
+			guard, err := d.Store.PairGuardForServe(game.ID)
+			if err != nil || guard == nil {
+				continue
+			}
+			live, err := d.Store.PairLiveModeForPeer(game.ID, guard.PeerID)
+			if err != nil || !live.LocalActive {
+				continue
+			}
 		}
 		if err := d.watchGame(game.ID, game.SavePath); err != nil {
 			if errors.Is(err, watcher.ErrSaveFolderMissing) {
@@ -525,6 +542,15 @@ func SteamCoverURL(appID string) string {
 // then trims that game's remote copies. Always started with d.uploads already
 // incremented by the caller, and it owns releasing that count.
 func (d *Daemon) runCloudUpload(zipPath, remoteFileName string, log *logging.Logger) {
+	if id, _, ok := strings.Cut(remoteFileName, "__"); ok {
+		if d.provisioningBlocks(id) {
+			return
+		}
+		guard, err := d.Store.PairGuardForServe(id)
+		if err != nil || guard != nil {
+			return
+		}
+	}
 	defer d.uploads.Done()
 
 	// Whole, even if it has been compacted since it was queued (a pause can
@@ -623,8 +649,18 @@ func (d *Daemon) ResyncWatchers() (started, stopped int) {
 	names := make(map[string]string, len(games))
 	for _, game := range games {
 		names[game.ID] = game.Name
-		if game.AutoSync && !d.provisioningBlocks(game.ID) {
-			want[game.ID] = game.SavePath
+		if !d.provisioningBlocks(game.ID) {
+			if game.AutoSync {
+				want[game.ID] = game.SavePath
+			} else {
+				guard, err := d.Store.PairGuardForServe(game.ID)
+				if err == nil && guard != nil {
+					live, e := d.Store.PairLiveModeForPeer(game.ID, guard.PeerID)
+					if e == nil && live.LocalActive {
+						want[game.ID] = game.SavePath
+					}
+				}
+			}
 		}
 	}
 

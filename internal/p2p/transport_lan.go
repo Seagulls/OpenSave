@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
+	urlpkg "net/url"
 	"sync"
 	"time"
 
@@ -40,7 +40,7 @@ func peerURL(peer syncengine.Peer, route string) string {
 }
 
 func (t *lanTransport) FetchManifest(ctx context.Context, peer syncengine.Peer, gameID string, q syncengine.ManifestQuery) (syncengine.ManifestResponse, error) {
-	params := url.Values{}
+	params := urlpkg.Values{}
 	if q.Name != "" {
 		params.Set("name", q.Name)
 	}
@@ -53,6 +53,9 @@ func (t *lanTransport) FetchManifest(ctx context.Context, peer syncengine.Peer, 
 	}
 	if q.CoverURL != "" {
 		params.Set("coverUrl", q.CoverURL)
+	}
+	if q.PairLiveEpoch != "" {
+		params.Set("pairLiveEpoch", q.PairLiveEpoch)
 	}
 
 	var resp syncengine.ManifestResponse
@@ -68,7 +71,7 @@ func (t *lanTransport) FetchBlocks(ctx context.Context, peer syncengine.Peer, re
 	// compressor, so the bytes saved cost more than they're worth. Responses
 	// are still decoded, so a peer that compresses anyway is handled.
 	err := t.postJSON(ctx, peer, peerURL(peer, "/blocks/"+ref.GameID), map[string]any{
-		"relPath": ref.RelPath, "root": ref.Root, "generation": ref.Generation,
+		"relPath": ref.RelPath, "root": ref.Root, "generation": ref.Generation, "pairLiveEpoch": ref.PairLiveEpoch,
 		"blockIndices": blockIndices, "blockSize": blockSize,
 	}, &resp)
 	if err != nil {
@@ -78,7 +81,7 @@ func (t *lanTransport) FetchBlocks(ctx context.Context, peer syncengine.Peer, re
 }
 
 func (t *lanTransport) DeleteRemote(ctx context.Context, peer syncengine.Peer, ref syncengine.FileRef) error {
-	return t.postJSON(ctx, peer, peerURL(peer, "/delete-file/"+ref.GameID), map[string]any{"relPath": ref.RelPath, "root": ref.Root}, nil)
+	return t.postJSON(ctx, peer, peerURL(peer, "/delete-file/"+ref.GameID), map[string]any{"relPath": ref.RelPath, "root": ref.Root, "pairLiveEpoch": ref.PairLiveEpoch}, nil)
 }
 
 // TriggerPeerPull tells a peer that this device holds newer content.
@@ -90,12 +93,15 @@ func (t *lanTransport) DeleteRemote(ctx context.Context, peer syncengine.Peer, r
 // noticed on its next periodic reconcile — up to a minute later, with nothing
 // reported anywhere. The identical mistake existed on the WAN side; see
 // wanTransport.TriggerPeerPull.
-func (t *lanTransport) TriggerPeerPull(peer syncengine.Peer, gameID string) {
+func (t *lanTransport) TriggerPeerPull(peer syncengine.Peer, gameID string, epoch ...string) {
 	// Fire-and-forget, 5s cap, same as the JS fetch().catch(() => {}).
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		url := fmt.Sprintf("http://%s:%d/api/sync/trigger/%s", peer.Address, peer.Port, gameID)
+		if len(epoch) > 0 && epoch[0] != "" {
+			url += "?pairLiveEpoch=" + urlpkg.QueryEscape(epoch[0])
+		}
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 		if err != nil {
 			return
@@ -248,7 +254,7 @@ func doJSON(req *http.Request, out any) error {
 func pingPeer(ctx context.Context, p store.Peer, fromNodeID string) (pingInfo, bool) {
 	pingCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	url := fmt.Sprintf("http://%s:%d/api/p2p/ping?from=%s", p.Address, p.Port, url.QueryEscape(fromNodeID))
+	url := fmt.Sprintf("http://%s:%d/api/p2p/ping?from=%s", p.Address, p.Port, urlpkg.QueryEscape(fromNodeID))
 	req, err := http.NewRequestWithContext(pingCtx, http.MethodGet, url, nil)
 	if err != nil {
 		return pingInfo{}, false

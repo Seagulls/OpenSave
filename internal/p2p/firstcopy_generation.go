@@ -98,3 +98,16 @@ func (e *Engine) sourceGeneration(gameID string) (sourceGenerationView, bool, er
 	e.generationMu.Unlock()
 	return view, true, nil
 }
+
+// sourceGenerationForMode distinguishes pinned first-copy reads from current
+// native pair-live reads; a request can never silently cross between them.
+func (e *Engine) sourceGenerationForMode(gameID, epoch string) (sourceGenerationView, bool, error) {
+	if epoch != "" {
+		local, err := e.Store.PairLiveLocalActivated(gameID)
+		if err != nil || !local {
+			return sourceGenerationView{}, false, fmt.Errorf("pair-live not activated")
+		}
+		return sourceGenerationView{}, false, nil
+	}
+	return e.sourceGeneration(gameID)
+}

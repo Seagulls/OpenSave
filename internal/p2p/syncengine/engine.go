@@ -259,13 +259,27 @@ func (e *Engine) SyncGame(ctx context.Context, gameID string, onlinePeers []Peer
 		return nil, fmt.Errorf("%w: %v", ErrProvisioningUnreadable, accessErr)
 	}
 	if access.Guard != nil {
-		return nil, ErrFirstCopyDirection
+		live, err := e.Store.PairLiveModeForPeer(gameID, access.Guard.PeerID)
+		if err != nil || !live.LocalActive {
+			return nil, ErrFirstCopyDirection
+		}
+		var only []Peer
+		for _, p := range onlinePeers {
+			if p.ID == access.Guard.PeerID {
+				only = append(only, p)
+			}
+		}
+		if len(only) != 1 {
+			return nil, ErrFirstCopyDirection
+		}
+		onlinePeers = only
+		ctx = WithPairLiveEpoch(ctx, live.DecisionID)
 	}
 	held, lease := access.Held, access.Lease
-	if lease != nil && lease.Role == store.FirstCopySource {
+	if lease != nil && lease.Role == store.FirstCopySource && PairLiveEpoch(ctx) == "" {
 		return nil, ErrFirstCopyDirection
 	}
-	if lease != nil && lease.Role == store.FirstCopyTarget {
+	if lease != nil && lease.Role == store.FirstCopyTarget && PairLiveEpoch(ctx) == "" {
 		var only []Peer
 		for _, peer := range onlinePeers {
 			if peer.ID == lease.PeerID {
@@ -385,7 +399,7 @@ func (e *Engine) SyncGame(ctx context.Context, gameID string, onlinePeers []Peer
 			// to answer.
 			_ = e.Store.UpdatePeerLastSynced(peer.ID, syncedNow())
 		default:
-			e.recordSynced(gameID, peer.ID)
+			e.recordSynced(gameID, peer.ID, ctx)
 		}
 	}
 
@@ -425,10 +439,14 @@ func syncedNow() string { return time.Now().UTC().Format("2006-01-02T15:04:05.00
 // reads, and per game and device, which is what a person asking "is my Deck
 // up to date with this save?" needs. The two are written together so they
 // cannot disagree about when.
-func (e *Engine) recordSynced(gameID, peerID string) {
+func (e *Engine) recordSynced(gameID, peerID string, ctx ...context.Context) {
 	// One transaction for both stamps. A delayed completion must not update
 	// peers.last_synced if protection was installed while its work ran.
-	if err := e.Store.RecordGamePeerSynced(gameID, peerID, syncedNow()); err != nil {
+	var scope context.Context = context.Background()
+	if len(ctx) > 0 && ctx[0] != nil {
+		scope = ctx[0]
+	}
+	if err := e.setSynced(scope, gameID, peerID, syncedNow()); err != nil {
 		e.Log("warn", fmt.Sprintf("sync stamp withheld for %s/%s: %v", gameID, peerID, err))
 	}
 }
@@ -439,6 +457,20 @@ func (e *Engine) SyncWithPeer(ctx context.Context, gameID string, peer Peer) (Re
 	if err != nil {
 		return Result{}, err
 	}
+	protected, err := e.Store.PairGuardForServe(gameID)
+	if err != nil {
+		return Result{}, err
+	}
+	if protected != nil {
+		live, liveErr := e.Store.PairLiveModeForPeer(gameID, peer.ID)
+		if liveErr != nil || !live.LocalActive || live.PeerID != peer.ID {
+			return Result{}, ErrFirstCopyDirection
+		}
+		if PairLiveEpoch(ctx) != "" && PairLiveEpoch(ctx) != live.DecisionID {
+			return Result{}, ErrFirstCopyDirection
+		}
+		ctx = WithPairLiveEpoch(ctx, live.DecisionID)
+	}
 	e.Log("info", fmt.Sprintf("syncing %q with %q (%s)", game.Name, peer.Name,
 		map[bool]string{true: "WAN relay", false: "direct LAN"}[peer.Wan()]))
 
@@ -447,6 +479,7 @@ func (e *Engine) SyncWithPeer(ctx context.Context, gameID string, peer Peer) (Re
 	remoteData, err := e.Transport.FetchManifest(ctx, peer, gameID, ManifestQuery{
 		Name: game.Name, SavePath: game.SavePath, IsFile: isFile,
 		AppID: game.AppID, CoverURL: game.CoverURL,
+		PairLiveEpoch: PairLiveEpoch(ctx),
 	})
 	if err != nil {
 		// The peer simply isn't tracking this game (they untracked it, or
@@ -484,6 +517,26 @@ func (e *Engine) SyncWithPeer(ctx context.Context, gameID string, peer Peer) (Re
 		return Result{}, fmt.Errorf("fetch remote manifest: %w", err)
 	}
 
+	if epoch := PairLiveEpoch(ctx); epoch != "" && (remoteData.PairLiveEpoch != epoch || remoteData.FirstCopy != nil) {
+		return Result{}, fmt.Errorf("live peer manifest has wrong decision mode")
+	}
+	if PairLiveEpoch(ctx) != "" {
+		if remoteData.ActiveBranch != game.ActiveBranch {
+			return Result{}, fmt.Errorf("pair-live cannot switch game branch")
+		}
+		paths, err := e.Store.GameRootPaths(gameID)
+		if err != nil || len(paths) != len(remoteData.Manifest.Extra) {
+			return Result{}, fmt.Errorf("pair-live named root layout unreadable or changed")
+		}
+		for name, path := range paths {
+			if _, ok := remoteData.Manifest.Extra[name]; !ok {
+				return Result{}, fmt.Errorf("pair-live missing remote root %q", name)
+			}
+			if _, err := delta.BuildManifest(path); err != nil {
+				return Result{}, fmt.Errorf("pair-live root %q unreadable: %w", name, err)
+			}
+		}
+	}
 	if err := e.preflightFirstCopyTarget(ctx, gameID, game, peer, remoteData); err != nil {
 		return Result{}, err
 	}
@@ -585,7 +638,7 @@ func (e *Engine) SyncWithPeer(ctx context.Context, gameID string, peer Peer) (Re
 	// save content, and the sync creates the missing folder anyway.
 	if agreedHash != "" && agreedHash != localManifest.ManifestHash() &&
 		sameFiles(localManifest, remoteData.Manifest) {
-		_ = e.Store.SetAgreedHash(gameID, peer.ID, localManifest.ManifestHash())
+		_ = e.setAgreedHash(ctx, gameID, peer.ID, localManifest.ManifestHash())
 		agreedHash = localManifest.ManifestHash()
 	}
 	// The same repair for the case the one above cannot reach: the sides no
@@ -608,7 +661,7 @@ func (e *Engine) SyncWithPeer(ctx context.Context, gameID string, peer Peer) (Re
 	// and skipping a conflict that a later agreement had earned.
 	if pushed := e.Store.GetPushedHash(gameID, peer.ID); pushed != "" {
 		if remoteHash := remoteData.Manifest.ManifestHash(); agreedHash != remoteHash && remoteHash == pushed {
-			_ = e.Store.SetAgreedHash(gameID, peer.ID, remoteHash)
+			_ = e.setAgreedHash(ctx, gameID, peer.ID, remoteHash)
 			agreedHash = remoteHash
 		}
 	}
@@ -619,7 +672,7 @@ func (e *Engine) SyncWithPeer(ctx context.Context, gameID string, peer Peer) (Re
 	// terms. Only against the base it was served under (served.go).
 	if remoteHash := remoteData.Manifest.ManifestHash(); agreedHash != remoteHash &&
 		e.servedUnderBase(gameID, peer.ID, unfilteredRemote.ManifestHash(), storedBase) {
-		_ = e.Store.SetAgreedHash(gameID, peer.ID, remoteHash)
+		_ = e.setAgreedHash(ctx, gameID, peer.ID, remoteHash)
 		agreedHash = remoteHash
 	}
 
@@ -694,12 +747,27 @@ func (e *Engine) SyncWithPeer(ctx context.Context, gameID string, peer Peer) (Re
 		}
 	}
 	decision := ComputeWithDeletions(localManifest, remoteData.Manifest, lineageFiles, lineageDirs, agreedHash, deleted)
+	if PairLiveEpoch(ctx) != "" {
+		if agreedHash == "" {
+			return Result{}, fmt.Errorf("pair-live native merge base missing")
+		}
+		lh, rh := localManifest.ManifestHash(), remoteData.Manifest.ManifestHash()
+		if (rh == agreedHash && lh != agreedHash &&
+			(decision.HasPull() || len(decision.FilesToDeleteLocally) > 0 || len(decision.DirsToDeleteLocally) > 0)) ||
+			(lh == agreedHash && rh != agreedHash &&
+				(decision.HasPush() || len(decision.FilesToDeleteOnPeer) > 0 || len(decision.DirsToDeleteOnPeer) > 0)) {
+			return Result{}, fmt.Errorf("pair-live direction refused: native mtime classification disagrees with verified base")
+		}
+	}
 
+	if PairLiveEpoch(ctx) != "" && !decision.HasChanges() && localManifest.ManifestHash() != remoteData.Manifest.ManifestHash() {
+		return Result{}, fmt.Errorf("pair-live refused false no-change classification for unequal manifests")
+	}
 	if !decision.HasChanges() {
 		e.Log("success", fmt.Sprintf("%q already in sync with %q", game.Name, peer.Name))
-		e.persistLineage(gameID, peer.ID, localManifest, remoteData.Manifest)
+		e.persistLineage(gameID, peer.ID, localManifest, remoteData.Manifest, ctx)
 		// Both sides verifiably identical: this is a convergence point.
-		_ = e.Store.SetAgreedHash(gameID, peer.ID, localManifest.ManifestHash())
+		_ = e.setAgreedHash(ctx, gameID, peer.ID, localManifest.ManifestHash())
 		// The peer must record this state too: it took no part in this
 		// exchange beyond serving its manifest, and without lineage or a
 		// last-synced time on its side, its NEXT pull from us misreads its
@@ -707,10 +775,10 @@ func (e *Engine) SyncWithPeer(ctx context.Context, gameID string, peer Peer) (Re
 		// The event carries the verified hash so the peer can safely
 		// re-confirm identity against its own current files (see
 		// ConfirmInSync).
-		e.Transport.ReportSyncEvent(peer, gameID, "in-sync", map[string]any{
+		e.Transport.ReportSyncEvent(peer, gameID, "in-sync", PairLiveEventData(ctx, map[string]any{
 			"peerName":     e.deviceName(),
 			"manifestHash": localManifest.ManifestHash(),
-		})
+		}))
 		// The primary location agreeing says nothing about the others, which
 		// are read through the gate — so the branch hold goes first.
 		releaseAligned()
@@ -830,7 +898,7 @@ func (e *Engine) SyncWithPeer(ctx context.Context, gameID string, peer Peer) (Re
 			handedOver = m.ManifestHash()
 		}
 		e.Log("info", fmt.Sprintf("local has newer content; triggering %q to pull", peer.Name))
-		e.Transport.TriggerPeerPull(peer, gameID)
+		e.Transport.TriggerPeerPull(peer, gameID, PairLiveEpoch(ctx))
 	}
 
 	// 10. Record the post-sync lineage. The fresh manifest captures files
@@ -845,7 +913,7 @@ func (e *Engine) SyncWithPeer(ctx context.Context, gameID string, peer Peer) (Re
 	if freshErr == nil {
 		e.persistLineage(gameID, peer.ID,
 			withPulled(mergeManifestPaths(freshManifest, localManifest), remoteData.Manifest, decision.FilesToPull, decision.DirsToPull),
-			remoteData.Manifest)
+			remoteData.Manifest, ctx)
 	}
 
 	// Convergence ratchet: after a pure pull (no push, no peer-side
@@ -868,15 +936,15 @@ func (e *Engine) SyncWithPeer(ctx context.Context, gameID string, peer Peer) (Re
 		// agreed until it has, which its report or the next sync shows.
 	case !decision.HasPush() &&
 		len(decision.FilesToDeleteOnPeer) == 0 && len(decision.DirsToDeleteOnPeer) == 0:
-		_ = e.Store.SetAgreedHash(gameID, peer.ID, remoteData.Manifest.ManifestHash())
+		_ = e.setAgreedHash(ctx, gameID, peer.ID, remoteData.Manifest.ManifestHash())
 	case handedOver != "":
 		// What the peer was actually offered, from step 9.
-		_ = e.Store.SetPushedHash(gameID, peer.ID, handedOver)
+		_ = e.setPushedHash(ctx, gameID, peer.ID, handedOver)
 	case freshErr == nil:
 		// Peer-side deletions with no push: nothing was handed over, so the
 		// state after this sync is the best description of where the peer is
 		// being asked to end up.
-		_ = e.Store.SetPushedHash(gameID, peer.ID, freshManifest.ManifestHash())
+		_ = e.setPushedHash(ctx, gameID, peer.ID, freshManifest.ManifestHash())
 	}
 
 	// Extra locations sync last and on their own terms, so the primary save —
@@ -953,7 +1021,7 @@ func (e *Engine) lineageSets(gameID, peerID string) (files, dirs map[string]stru
 // rebuild. Nothing new enters by this rule: a path has to have been in the
 // intersection once already, which is the confirmation the paragraph above
 // insists on.
-func (e *Engine) persistLineage(gameID, peerID string, local, remote delta.Manifest) {
+func (e *Engine) persistLineage(gameID, peerID string, local, remote delta.Manifest, contexts ...context.Context) {
 	files, dirs := IntersectLineage(local, remote)
 	oldFiles, oldDirs, err := e.Store.GetSyncState(gameID, peerID)
 	if err == nil {
@@ -968,7 +1036,11 @@ func (e *Engine) persistLineage(gameID, peerID string, local, remote delta.Manif
 		files = filterPathList(files, rules)
 		dirs = filterPathList(dirs, rules)
 	}
-	if err := e.Store.SetSyncState(gameID, peerID, files, dirs); err != nil {
+	var scope context.Context = context.Background()
+	if len(contexts) > 0 && contexts[0] != nil {
+		scope = contexts[0]
+	}
+	if err := e.setLineage(scope, gameID, peerID, "", files, dirs); err != nil {
 		e.Log("warn", fmt.Sprintf("persist sync lineage failed: %v", err))
 	}
 }
@@ -1195,6 +1267,11 @@ func IntersectLineage(local, remote delta.Manifest) (files, dirs []string) {
 // plain lineage refresh and record no timestamp: the conflict guard's
 // window must never shrink on unverified state.
 func (e *Engine) ConfirmInSync(ctx context.Context, gameID string, peer Peer, claimedHash string) {
+	if epoch := PairLiveEpoch(ctx); epoch != "" {
+		if err := e.Store.PairLiveValidateIncoming(gameID, peer.ID, epoch); err != nil {
+			return
+		}
+	}
 	game, err := e.Store.GetGame(gameID)
 	if err != nil {
 		return
@@ -1211,9 +1288,9 @@ func (e *Engine) ConfirmInSync(ctx context.Context, gameID string, peer Peer, cl
 	// strength of one folder (see RefreshLineage).
 	paths, _ := e.Store.GameRootPaths(gameID)
 	if claimedHash != "" && local.ManifestHash() == claimedHash && len(paths) == 0 {
-		e.persistLineage(gameID, peer.ID, local, local) // identical sides: lineage = our own paths
-		_ = e.Store.SetAgreedHash(gameID, peer.ID, claimedHash)
-		e.recordSynced(gameID, peer.ID)
+		e.persistLineage(gameID, peer.ID, local, local, ctx) // identical sides: lineage = our own paths
+		_ = e.setAgreedHash(ctx, gameID, peer.ID, claimedHash)
+		e.recordSynced(gameID, peer.ID, ctx)
 		e.notifySyncConfirmed(gameID)
 		return
 	}
@@ -1226,6 +1303,11 @@ func (e *Engine) ConfirmInSync(ctx context.Context, gameID string, peer Peer, cl
 // the lineage (making future local deletions of them propagate instead of
 // the file being pulled back).
 func (e *Engine) RefreshLineage(ctx context.Context, gameID string, peer Peer) {
+	if epoch := PairLiveEpoch(ctx); epoch != "" {
+		if err := e.Store.PairLiveValidateIncoming(gameID, peer.ID, epoch); err != nil {
+			return
+		}
+	}
 	game, err := e.Store.GetGame(gameID)
 	if err != nil {
 		return
@@ -1234,8 +1316,12 @@ func (e *Engine) RefreshLineage(ctx context.Context, gameID string, peer Peer) {
 	remoteData, err := e.Transport.FetchManifest(ctx, peer, gameID, ManifestQuery{
 		Name: game.Name, SavePath: game.SavePath, IsFile: isFile,
 		AppID: game.AppID, CoverURL: game.CoverURL,
+		PairLiveEpoch: PairLiveEpoch(ctx),
 	})
 	if err != nil {
+		return
+	}
+	if epoch := PairLiveEpoch(ctx); epoch != "" && (remoteData.PairLiveEpoch != epoch || remoteData.FirstCopy != nil) {
 		return
 	}
 	// The lineage is what both sides hold, so neither side may be mid-write:
@@ -1244,7 +1330,7 @@ func (e *Engine) RefreshLineage(ctx context.Context, gameID string, peer Peer) {
 	if err != nil {
 		return
 	}
-	e.persistLineage(gameID, peer.ID, local, remoteData.Manifest)
+	e.persistLineage(gameID, peer.ID, local, remoteData.Manifest, ctx)
 	rootsAgree := e.refreshRootLineage(ctx, gameID, remoteData, peer)
 	// Peer finished pulling: if both sides now hash identically, that's a
 	// verified convergence — ratchet the merge-base. It is also the moment
@@ -1261,9 +1347,9 @@ func (e *Engine) RefreshLineage(ctx context.Context, gameID string, peer Peer) {
 	// One side's edit was overwritten with no conflict raised. It took a
 	// report arriving late — after both edits — which under load it does.
 	if local.ManifestHash() == remoteData.Manifest.ManifestHash() {
-		_ = e.Store.SetAgreedHash(gameID, peer.ID, local.ManifestHash())
+		_ = e.setAgreedHash(ctx, gameID, peer.ID, local.ManifestHash())
 		if rootsAgree {
-			e.recordSynced(gameID, peer.ID)
+			e.recordSynced(gameID, peer.ID, ctx)
 			e.notifySyncConfirmed(gameID)
 		}
 	}
@@ -1297,9 +1383,9 @@ func (e *Engine) refreshRootLineage(ctx context.Context, gameID string, remoteDa
 			agree = false
 			continue
 		}
-		e.persistRootLineage(gameID, peer.ID, sr.root.Name, local, sr.remote)
+		e.persistRootLineage(gameID, peer.ID, sr.root.Name, local, sr.remote, ctx)
 		if local.RootHash(delta.PrimaryRoot) == sr.remote.RootHash(delta.PrimaryRoot) {
-			_ = e.Store.SetAgreedHashForRoot(gameID, peer.ID, sr.root.Name,
+			_ = e.setAgreedHashForRoot(ctx, gameID, peer.ID, sr.root.Name,
 				local.RootHash(delta.PrimaryRoot))
 		} else {
 			agree = false
@@ -1450,6 +1536,9 @@ func firstCopyFenceFrom(ctx context.Context) (firstCopyFence, bool) {
 // to a normal bidirectional sync. A target that already has different files
 // is refused before any local delete or peer write.
 func (e *Engine) guardFirstCopy(ctx context.Context, d *Decision, gameID, peerID string) error {
+	if PairLiveEpoch(ctx) != "" {
+		return e.requirePairLiveEpoch(ctx, gameID, peerID)
+	}
 	if d == nil || e == nil || e.Store == nil {
 		return nil
 	}
@@ -1520,7 +1609,7 @@ func (e *Engine) propagateDeletions(ctx context.Context, peer Peer, gameID strin
 		if !delta.IsSafePath(root.Path, relPath) {
 			continue
 		}
-		ref := FileRef{GameID: gameID, Root: root.Name, RelPath: relPath}
+		ref := FileRef{GameID: gameID, Root: root.Name, RelPath: relPath, PairLiveEpoch: PairLiveEpoch(ctx)}
 		if err := e.Transport.DeleteRemote(ctx, peer, ref); err != nil {
 			e.Log("warn", fmt.Sprintf("could not propagate deletion of %s: %v", relPath, err))
 		}
@@ -1531,7 +1620,7 @@ func (e *Engine) propagateDeletions(ctx context.Context, peer Peer, gameID strin
 		if !delta.IsSafePath(root.Path, relDir) {
 			continue
 		}
-		ref := FileRef{GameID: gameID, Root: root.Name, RelPath: relDir}
+		ref := FileRef{GameID: gameID, Root: root.Name, RelPath: relDir, PairLiveEpoch: PairLiveEpoch(ctx)}
 		if err := e.Transport.DeleteRemote(ctx, peer, ref); err != nil {
 			e.Log("warn", fmt.Sprintf("could not propagate dir deletion of %s: %v", relDir, err))
 		}
@@ -1737,7 +1826,7 @@ func (e *Engine) pullFiles(ctx context.Context, peer Peer, gameID string, game s
 			localFilePath = root.Path // single-file save mode
 		}
 		if err := e.pullFile(ctx, peer, FileRef{
-			GameID: gameID, Root: root.Name, RelPath: relPath, Generation: remoteData.FirstCopy,
+			GameID: gameID, Root: root.Name, RelPath: relPath, Generation: remoteData.FirstCopy, PairLiveEpoch: remoteData.PairLiveEpoch,
 		}, localFilePath,
 			remoteFile, indices, throttle, tracker, reportProgress); err != nil {
 			return err
@@ -1782,14 +1871,14 @@ func (e *Engine) pullFiles(ctx context.Context, peer Peer, gameID string, game s
 	// It used to learn them by re-fetching our whole manifest and re-walking
 	// its own disk, which under load is exactly when the window is widest.
 	// We already know what we wrote, so we say so.
-	e.Transport.ReportSyncEvent(peer, gameID, "sync-complete", map[string]any{
+	e.Transport.ReportSyncEvent(peer, gameID, "sync-complete", PairLiveEventData(ctx, map[string]any{
 		"peerName": deviceName, "direction": "upload", "pulledFiles": pulled,
 		// Which save location they were written into. The paths are relative
 		// to it, and recorded against the main save folder they name files
 		// that are not there. Empty for the main folder; older versions leave
 		// it out, which reads the same.
 		"root": root.Name,
-	})
+	}))
 	if len(pulled) > 0 {
 		e.RecordActivity(store.ActivityEvent{GameID: gameID, Kind: store.ActivityReceived, Device: peer.Name,
 			Files: len(pulled), Bytes: totalBytes, Detail: locationDetail(root.Name)})

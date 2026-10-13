@@ -137,10 +137,24 @@ func (e *Engine) syncOneRoot(ctx context.Context, gameID string, game store.Game
 		lineageDirs = filterLineage(lineageDirs, rules)
 	}
 	decision := Compute(local, remote, lineageFiles, lineageDirs)
+	if PairLiveEpoch(ctx) != "" {
+		base := e.Store.GetAgreedHashForRoot(gameID, peer.ID, sr.root.Name)
+		if base == "" {
+			return fmt.Errorf("pair-live missing named-root merge base")
+		}
+		lh, rh := local.RootHash(delta.PrimaryRoot), remote.RootHash(delta.PrimaryRoot)
+		if (rh == base && lh != base && (decision.HasPull() || len(decision.FilesToDeleteLocally) > 0)) ||
+			(lh == base && rh != base && (decision.HasPush() || len(decision.FilesToDeleteOnPeer) > 0)) {
+			return fmt.Errorf("pair-live named-root direction refused; await upstream agreed-base correction")
+		}
+	}
 
+	if PairLiveEpoch(ctx) != "" && !decision.HasChanges() && local.RootHash(delta.PrimaryRoot) != remote.RootHash(delta.PrimaryRoot) {
+		return fmt.Errorf("pair-live refused false no-change classification for named save root")
+	}
 	if !decision.HasChanges() {
-		e.persistRootLineage(gameID, peer.ID, sr.root.Name, local, remote)
-		_ = e.Store.SetAgreedHashForRoot(gameID, peer.ID, sr.root.Name, local.RootHash(delta.PrimaryRoot))
+		e.persistRootLineage(gameID, peer.ID, sr.root.Name, local, remote, ctx)
+		_ = e.setAgreedHashForRoot(ctx, gameID, peer.ID, sr.root.Name, local.RootHash(delta.PrimaryRoot))
 		return nil
 	}
 
@@ -166,7 +180,7 @@ func (e *Engine) syncOneRoot(ctx context.Context, gameID string, game store.Game
 	// Both hashes are of the filtered view, which is what the push recorded.
 	if pushed := e.Store.GetPushedHashForRoot(gameID, peer.ID, sr.root.Name); pushed != "" {
 		if remoteHash := remote.RootHash(delta.PrimaryRoot); base != remoteHash && remoteHash == pushed {
-			_ = e.Store.SetAgreedHashForRoot(gameID, peer.ID, sr.root.Name, remoteHash)
+			_ = e.setAgreedHashForRoot(ctx, gameID, peer.ID, sr.root.Name, remoteHash)
 			base = remoteHash
 		}
 	}
@@ -248,7 +262,7 @@ func (e *Engine) syncOneRoot(ctx context.Context, gameID string, game store.Game
 	}
 	applied()
 	if decision.HasPush() {
-		e.Transport.TriggerPeerPull(peer, gameID)
+		e.Transport.TriggerPeerPull(peer, gameID, PairLiveEpoch(ctx))
 	}
 
 	fresh, freshErr := e.ReadManifest(ctx, gameID, sr.root.Path)
@@ -258,7 +272,7 @@ func (e *Engine) syncOneRoot(ctx context.Context, gameID string, game store.Game
 		// excluded paths removed — so they cannot reach the lineage from
 		// either direction. Same arrangement as the main folder.
 		e.persistRootLineage(gameID, peer.ID, sr.root.Name,
-			withPulled(mergeManifestPaths(fresh, local), remote, decision.FilesToPull, decision.DirsToPull), remote)
+			withPulled(mergeManifestPaths(fresh, local), remote, decision.FilesToPull, decision.DirsToPull), remote, ctx)
 	}
 
 	// Same ratchet as the primary location, for the same reason: after a pure
@@ -269,19 +283,23 @@ func (e *Engine) syncOneRoot(ctx context.Context, gameID string, game store.Game
 	// every later one-sided edit into a false conflict.
 	if !decision.HasPush() &&
 		len(decision.FilesToDeleteOnPeer) == 0 && len(decision.DirsToDeleteOnPeer) == 0 {
-		_ = e.Store.SetAgreedHashForRoot(gameID, peer.ID, sr.root.Name, remote.RootHash(delta.PrimaryRoot))
+		_ = e.setAgreedHashForRoot(ctx, gameID, peer.ID, sr.root.Name, remote.RootHash(delta.PrimaryRoot))
 	} else if freshErr == nil {
 		// Recorded in the filtered view too, since that is what the next pass
 		// compares it against.
-		_ = e.Store.SetPushedHashForRoot(gameID, peer.ID, sr.root.Name,
+		_ = e.setPushedHashForRoot(ctx, gameID, peer.ID, sr.root.Name,
 			filterManifest(fresh, rules).RootHash(delta.PrimaryRoot))
 	}
 	return nil
 }
 
-func (e *Engine) persistRootLineage(gameID, peerID, root string, local, remote delta.Manifest) {
+func (e *Engine) persistRootLineage(gameID, peerID, root string, local, remote delta.Manifest, contexts ...context.Context) {
 	files, dirs := IntersectLineage(local, remote)
-	if err := e.Store.SetSyncStateForRoot(gameID, peerID, root, files, dirs); err != nil {
+	var scope context.Context = context.Background()
+	if len(contexts) > 0 && contexts[0] != nil {
+		scope = contexts[0]
+	}
+	if err := e.setLineage(scope, gameID, peerID, root, files, dirs); err != nil {
 		e.Log("warn", fmt.Sprintf("persist lineage for the %q location failed: %v", root, err))
 	}
 }

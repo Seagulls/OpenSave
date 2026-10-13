@@ -86,7 +86,7 @@ func (a *deviceA) FetchBlocks(ctx context.Context, peer syncengine.Peer, ref syn
 func (a *deviceA) DeleteRemote(ctx context.Context, peer syncengine.Peer, ref syncengine.FileRef) error {
 	return os.RemoveAll(filepath.Join(a.base(ref.Root), filepath.FromSlash(ref.RelPath)))
 }
-func (a *deviceA) TriggerPeerPull(peer syncengine.Peer, gameID string) {}
+func (a *deviceA) TriggerPeerPull(peer syncengine.Peer, gameID string, epoch ...string) {}
 func (a *deviceA) ReportSyncEvent(peer syncengine.Peer, gameID, eventType string, data map[string]any) {
 	a.mu.Lock()
 	defer a.mu.Unlock()

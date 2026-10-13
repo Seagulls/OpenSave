@@ -70,7 +70,8 @@ type Engine struct {
 	// it what tracking by hand does: a watch, and a first snapshot of what is
 	// already in its folder. Without it the game had neither (GitHub #16).
 	// Wired by the daemon. May be nil.
-	OnAutoTracked func(game store.Game)
+	OnAutoTracked       func(game store.Game)
+	OnPairLiveActivated func(gameID string)
 
 	// SwitchSaveFolder picks where a Switch save arriving from a peer belongs
 	// on this device (presets.Scanner.SwitchSaveFolder). Wired by the daemon.
@@ -470,6 +471,23 @@ func (e *Engine) SyncGame(ctx context.Context, gameID string) (map[string]syncen
 		}
 	}
 	gameID = e.localGameID(gameID)
+	guard, guardErr := e.Store.PairGuardForServe(gameID)
+	if guardErr != nil {
+		return nil, guardErr
+	}
+	liveEpoch := ""
+	if guard != nil {
+		live, err := e.Store.PairLiveModeForPeer(gameID, guard.PeerID)
+		if err != nil {
+			return nil, err
+		}
+		if !live.LocalActive || live.DecisionID == "" {
+			return nil, syncengine.ErrFirstCopyDirection
+		}
+		targetOnly = guard.PeerID
+		liveEpoch = live.DecisionID
+		ctx = syncengine.WithPairLiveEpoch(ctx, liveEpoch)
+	}
 	e.PingPairedPeers(ctx)
 	online := e.OnlinePeers()
 	if targetOnly != "" {
@@ -648,7 +666,7 @@ func (e *Engine) retryPendingResyncs(ctx context.Context) {
 			continue
 		}
 		e.Log("info", fmt.Sprintf("retrying interrupted sync for %s", id))
-		results, err := e.Sync.SyncGame(ctx, id, online)
+		results, err := e.SyncGame(ctx, id)
 		if err == nil {
 			e.trackSyncOutcome(id, results) // clears on success
 			e.pendingMu.Lock()
@@ -733,7 +751,18 @@ func (e *Engine) firstCopyServe(gameID, requester string, read bool) (allowHeldR
 	return firstCopyServeState(access, requester, read)
 }
 
-func (e *Engine) peerGameAccess(gameID, requester string, read bool) (stop bool, status int, msg string) {
+func (e *Engine) peerGameAccess(gameID, requester string, read bool, epoch ...string) (stop bool, status int, msg string) {
+	if len(epoch) > 0 && epoch[0] != "" {
+		if err := e.Store.PairLiveValidateIncoming(gameID, requester, epoch[0]); err != nil {
+			return true, http.StatusConflict, "pair-live session not authorized"
+		}
+		return false, 0, ""
+	}
+	activated, err := e.Store.PairLiveLocalActivated(gameID)
+	if err != nil || activated {
+		return true, http.StatusConflict, "live pair requires signed, decision-bound request"
+	}
+
 	access, err := e.Store.PeerTransferAccess(gameID)
 	if err != nil {
 		return true, http.StatusServiceUnavailable, syncengine.ProvisioningUnreadableMessage
@@ -752,7 +781,7 @@ func (e *Engine) peerGameAccess(gameID, requester string, read bool) (stop bool,
 // completion notification can mutate any sync history. A missing game, a
 // recorded first-copy transaction (even if expired), or unreadable protection
 // state is NOT permission to record convergence. Never guess by title/AppID.
-func (e *Engine) syncEventGame(gameID, peerID string) (string, error) {
+func (e *Engine) syncEventGame(gameID, peerID string, epoch ...string) (string, error) {
 	if gameID == "" || peerID == "" {
 		return "", fmt.Errorf("sync event requires a tracked game and signed peer")
 	}
@@ -769,6 +798,12 @@ func (e *Engine) syncEventGame(gameID, peerID string) (string, error) {
 		if _, err := e.Store.GetGame(canonical); err != nil {
 			return "", fmt.Errorf("sync event alias target is not tracked: %w", err)
 		}
+	}
+	if len(epoch) > 0 && epoch[0] != "" {
+		if err := e.Store.PairLiveValidateIncoming(canonical, peerID, epoch[0]); err != nil {
+			return "", fmt.Errorf("sync event live decision refused: %w", err)
+		}
+		return canonical, nil
 	}
 	access, err := e.Store.PeerTransferAccess(canonical)
 	if err != nil {
@@ -834,7 +869,20 @@ func (e *Engine) SyncAllGames(ctx context.Context) {
 			e.Log("warn", "not syncing: a first-copy lease could not be read: "+lerr.Error())
 			return
 		}
-		if _, skip := held[g.ID]; !g.AutoSync || skip || lease != nil {
+		if _, skip := held[g.ID]; skip {
+			continue
+		}
+		if lease != nil {
+			live, err := e.Store.PairLiveModeForPeer(g.ID, lease.PeerID)
+			if err != nil || !live.LocalActive {
+				continue
+			}
+			if _, err = e.SyncGame(ctx, g.ID); err != nil {
+				e.Log("warn", fmt.Sprintf("pair-live reconcile %s: %v", g.ID, err))
+			}
+			continue
+		}
+		if !g.AutoSync {
 			continue
 		}
 		results, err := e.Sync.SyncGame(ctx, g.ID, online)
