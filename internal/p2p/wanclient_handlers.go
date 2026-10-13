@@ -116,6 +116,13 @@ func (w *WanClient) handleMessage(ctx context.Context, msg RelayMessage) {
 		}
 
 	case "sync-event":
+		// Bare relay frames are unauthenticated and replayable. They may
+		// update UI progress but must NEVER advance lineage or sync stamps.
+		// New peers send completion evidence via signed /sync/event requests.
+		if msg.EventType == "sync-complete" || msg.EventType == "in-sync" {
+			w.engine.Log("warn", "discarded unsigned WAN convergence event")
+			return
+		}
 		// Unseal before anything reads the payload. Every branch below uses
 		// msg.Data, so decrypting in place here keeps them all unchanged
 		// rather than leaving one of them reading ciphertext.
@@ -366,6 +373,7 @@ func (w *WanClient) routeRequest(ctx context.Context, msg RelayMessage) (int, an
 		strings.HasPrefix(route, "/blocks/") ||
 		strings.HasPrefix(route, "/snapshot/") ||
 		strings.HasPrefix(route, "/sync/trigger/") ||
+		strings.HasPrefix(route, "/sync/event/") ||
 		strings.HasPrefix(route, "/delete-file/") ||
 		strings.HasPrefix(route, "/first-copy/receipt/") ||
 		strings.HasPrefix(route, "/first-copy/handover/prepare/") ||
@@ -595,6 +603,41 @@ func (w *WanClient) routeRequest(ctx context.Context, msg RelayMessage) (int, an
 			return 409, map[string]string{"error": err.Error()}
 		}
 		return 200, map[string]any{"accepted": true, "fenceActive": true, "openAuthorized": false, "autoSync": false}
+
+	case strings.HasPrefix(route, "/sync/event/"):
+		// routeRequest already verified the pairing MAC, timestamp and nonce;
+		// a bare relay notification never enters this handler.
+		if msg.Method != "POST" || len(msg.Body) > 262144 {
+			return 400, map[string]string{"error": "invalid convergence notification"}
+		}
+		var event struct {
+			EventType string         `json:"eventType"`
+			Data      map[string]any `json:"data"`
+		}
+		if err := json.Unmarshal(msg.Body, &event); err != nil ||
+			(event.EventType != "sync-complete" && event.EventType != "in-sync") {
+			return 400, map[string]string{"error": "invalid convergence event"}
+		}
+		gameID := strings.TrimPrefix(route, "/sync/event/")
+		canonical, err := w.engine.syncEventGame(gameID, from)
+		if err != nil {
+			return 409, map[string]string{"error": err.Error()}
+		}
+		sp := syncengine.Peer{ID: peer.ID, Name: peer.Name, Address: "relay", Port: peer.Port, IsWan: true}
+		if event.EventType == "sync-complete" {
+			if w.engine.Sync.Progress.OnSyncComplete != nil {
+				w.engine.Sync.Progress.OnSyncComplete(canonical, progressEventFromMap(event.Data))
+			}
+			w.engine.peerFinishedPulling(canonical, sp, event.Data)
+		} else {
+			claimedHash, _ := event.Data["manifestHash"].(string)
+			go func() {
+				refreshCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+				defer cancel()
+				w.engine.Sync.ConfirmInSync(refreshCtx, canonical, sp, claimedHash)
+			}()
+		}
+		return 200, map[string]any{"success": true}
 
 	case strings.HasPrefix(route, "/manifest/"):
 		return w.serveManifest(route, msg.Body, msg.From)

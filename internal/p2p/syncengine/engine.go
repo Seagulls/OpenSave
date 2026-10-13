@@ -426,9 +426,11 @@ func syncedNow() string { return time.Now().UTC().Format("2006-01-02T15:04:05.00
 // up to date with this save?" needs. The two are written together so they
 // cannot disagree about when.
 func (e *Engine) recordSynced(gameID, peerID string) {
-	ts := syncedNow()
-	_ = e.Store.UpdatePeerLastSynced(peerID, ts)
-	_ = e.Store.UpdateGamePeerLastSynced(gameID, peerID, ts)
+	// One transaction for both stamps. A delayed completion must not update
+	// peers.last_synced if protection was installed while its work ran.
+	if err := e.Store.RecordGamePeerSynced(gameID, peerID, syncedNow()); err != nil {
+		e.Log("warn", fmt.Sprintf("sync stamp withheld for %s/%s: %v", gameID, peerID, err))
+	}
 }
 
 // SyncWithPeer runs the full state machine against a single peer.

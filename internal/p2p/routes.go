@@ -1002,6 +1002,30 @@ func (e *Engine) handleSyncEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Progress-only events keep the historical compatibility path. Reports
+	// asserting convergence or peer-held files require an authenticated peer
+	// and a fresh canonical-game guard read, NOT an IP-address match.
+	canonicalID := gameID
+	var signedPeer syncengine.Peer
+	if body.EventType == "sync-complete" || body.EventType == "in-sync" {
+		signedID, _ := r.Context().Value(lanSignedPeerKey{}).(string)
+		if signedID == "" || signedID != lanPeerID(r) {
+			jsonError(w, http.StatusUnauthorized, "sync metadata events require signed peer identity")
+			return
+		}
+		var gateErr error
+		canonicalID, gateErr = e.syncEventGame(gameID, signedID)
+		if gateErr != nil {
+			jsonError(w, http.StatusConflict, gateErr.Error())
+			return
+		}
+		p, err := e.Store.GetPeer(signedID)
+		if err != nil {
+			jsonError(w, http.StatusUnauthorized, "sync metadata peer no longer paired")
+			return
+		}
+		signedPeer = syncengine.Peer{ID: p.ID, Name: p.Name, Address: p.Address, Port: p.Port, IsWan: p.Address == "relay"}
+	}
 	ev := progressEventFromMap(body.Data)
 	switch body.EventType {
 	case "sync-start":
@@ -1016,20 +1040,16 @@ func (e *Engine) handleSyncEvent(w http.ResponseWriter, r *http.Request) {
 		if e.Sync.Progress.OnSyncComplete != nil {
 			e.Sync.Progress.OnSyncComplete(gameID, ev)
 		}
-		if peer, ok := e.peerByAddress(clientIP(r)); ok {
-			e.peerFinishedPulling(gameID, peer, body.Data)
-		}
+		e.peerFinishedPulling(canonicalID, signedPeer, body.Data)
 	case "in-sync":
 		// The peer verified both sides hold identical content; confirm on
 		// our side (hash re-check) before recording lineage + last-synced.
 		claimedHash, _ := body.Data["manifestHash"].(string)
-		if peer, ok := e.peerByAddress(clientIP(r)); ok {
-			go func() {
-				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-				defer cancel()
-				e.Sync.ConfirmInSync(ctx, gameID, peer, claimedHash)
-			}()
-		}
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+			e.Sync.ConfirmInSync(ctx, canonicalID, signedPeer, claimedHash)
+		}()
 	case "sync-error":
 		if e.Sync.Progress.OnSyncError != nil {
 			e.Sync.Progress.OnSyncError(gameID, ev)
@@ -1139,6 +1159,14 @@ func SetServedProto(v int) int {
 // freshly-pushed files deliberately stay out of it (see persistLineage), so
 // deleting one here would pull it back instead of propagating the delete.
 func (e *Engine) peerFinishedPulling(gameID string, peer syncengine.Peer, data map[string]any) {
+	// Check again after transport dispatch: a hold/guard may have appeared
+	// since the request entered, and the SQLite write fence below handles
+	// the remaining race between this check and the actual persistence.
+	canonical, err := e.syncEventGame(gameID, peer.ID)
+	if err != nil {
+		return
+	}
+	gameID = canonical
 	// Recorded first, and synchronously: the peer said exactly which files it
 	// wrote, so the lineage can be updated now rather than after a manifest
 	// round trip. That round trip is what left a window in which deleting a

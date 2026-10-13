@@ -156,6 +156,39 @@ func (s *Store) SetPeerPairedAt(id, timestampISO8601 string) error {
 	return checkRowAffected(res)
 }
 
+// RecordGamePeerSynced records both the game-specific and device-wide stamp
+// atomically. The per-game upsert is covered by migration 0048's protection
+// trigger; a concurrent hold makes the entire transaction fail without
+// moving the device-wide clock and distorting first-contact conflict logic.
+func (s *Store) RecordGamePeerSynced(gameID, peerID, timestampISO8601 string) error {
+	tx, err := s.db.Beginx()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.Exec(`
+        INSERT INTO game_peer_sync_state
+            (game_id, peer_id, last_synced_files, last_synced_dirs, last_synced)
+        SELECT ?, ?, '[]', '[]', ? WHERE `+gameIsTracked+`
+        ON CONFLICT(game_id, peer_id) DO UPDATE SET
+            last_synced = excluded.last_synced`,
+		gameID, peerID, timestampISO8601, gameID)
+	if err != nil {
+		return fmt.Errorf("record game sync stamp: %w", err)
+	}
+	if err := checkRowAffected(result); err != nil {
+		return err
+	}
+	result, err = tx.Exec(`UPDATE peers SET last_synced=? WHERE id=?`, timestampISO8601, peerID)
+	if err != nil {
+		return fmt.Errorf("record peer sync stamp: %w", err)
+	}
+	if err := checkRowAffected(result); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 // UpdatePeerLastSynced stamps a peer's last_synced time (called after a
 // successful sync run completes with that peer).
 func (s *Store) UpdatePeerLastSynced(id, timestampISO8601 string) error {

@@ -748,6 +748,44 @@ func (e *Engine) peerGameAccess(gameID, requester string, read bool) (stop bool,
 	return false, 0, ""
 }
 
+// syncEventGame identifies a tracked game before an authenticated peer's
+// completion notification can mutate any sync history. A missing game, a
+// recorded first-copy transaction (even if expired), or unreadable protection
+// state is NOT permission to record convergence. Never guess by title/AppID.
+func (e *Engine) syncEventGame(gameID, peerID string) (string, error) {
+	if gameID == "" || peerID == "" {
+		return "", fmt.Errorf("sync event requires a tracked game and signed peer")
+	}
+	if _, err := e.Store.GetPeer(peerID); err != nil {
+		return "", fmt.Errorf("sync event peer is not paired: %w", err)
+	}
+	canonical := gameID
+	if _, err := e.Store.GetGame(canonical); err != nil {
+		mapped, ok := e.Store.ResolveGameAlias(gameID)
+		if !ok {
+			return "", fmt.Errorf("sync event game is not tracked")
+		}
+		canonical = mapped
+		if _, err := e.Store.GetGame(canonical); err != nil {
+			return "", fmt.Errorf("sync event alias target is not tracked: %w", err)
+		}
+	}
+	access, err := e.Store.PeerTransferAccess(canonical)
+	if err != nil {
+		return "", fmt.Errorf("sync event protection unreadable: %w", err)
+	}
+	// The hot-path lease view hides expired unactivated transactions, which
+	// are not authorization to record sync history either.
+	recorded, err := e.Store.RecordedFirstCopy(canonical)
+	if err != nil {
+		return "", fmt.Errorf("sync event first-copy unreadable: %w", err)
+	}
+	if access.Held || access.Lease != nil || access.Guard != nil || recorded != nil {
+		return "", fmt.Errorf("sync event refused: game is protected by first copy")
+	}
+	return canonical, nil
+}
+
 func (e *Engine) provisioningServeRefusal(gameID string) (refuse bool, status int, msg string) {
 	held, err := e.provisioningHeld(gameID)
 	if err != nil {

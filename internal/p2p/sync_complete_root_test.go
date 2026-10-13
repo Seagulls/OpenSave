@@ -13,6 +13,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/opensave/opensave/internal/e2ee"
 	"github.com/opensave/opensave/internal/p2p/syncengine"
 )
 
@@ -53,7 +54,13 @@ func (f *raceFixture) reportOverLAN(t *testing.T, data map[string]any) {
 	r.RemoteAddr = f.peer.Address + ":40000" // A's address: the report is attributed to A
 	rc := chi.NewRouteContext()
 	rc.URLParams.Add("gameId", f.gameID)
-	r = r.WithContext(context.WithValue(r.Context(), chi.RouteCtxKey, rc))
+	// This fixture invokes the handler directly, bypassing requirePairedPeer.
+	// Simulate the context set by the middleware AFTER valid LAN MAC verification.
+	// Dedicated auth tests exercise actual MAC failure/replay over the network.
+	ctx := context.WithValue(r.Context(), chi.RouteCtxKey, rc)
+	ctx = context.WithValue(ctx, lanPeerKey{}, f.peer.ID)
+	ctx = context.WithValue(ctx, lanSignedPeerKey{}, f.peer.ID)
+	r = r.WithContext(ctx)
 	w := httptest.NewRecorder()
 	f.e.handleSyncEvent(w, r)
 	if w.Code != http.StatusOK {
@@ -61,14 +68,50 @@ func (f *raceFixture) reportOverLAN(t *testing.T, data map[string]any) {
 	}
 }
 
-// reportOverRelay is the same report arriving through the relay.
+// reportOverRelay exercises the relay's authenticated request dispatcher.
+// The former bare "sync-event" wire type is deliberately display-only: a
+// convergence report now uses signed /sync/event. The fixture already has
+// a paired peer, and issues a fresh, valid request MAC for that identity.
 func (f *raceFixture) reportOverRelay(t *testing.T, data map[string]any) {
 	t.Helper()
-	raw, _ := json.Marshal(data)
+	remote, err := e2ee.GenerateIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.s.SetPeerPublicKey(f.peer.ID, e2ee.EncodeKey(remote.Public)); err != nil {
+		t.Fatal(err)
+	}
+	local, err := f.s.DeviceIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := e2ee.AuthKey(remote.Private, local.Public)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(map[string]any{"eventType": "sync-complete", "data": data})
+	if err != nil {
+		t.Fatal(err)
+	}
+	nonce, err := e2ee.NewNonce()
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg := RelayMessage{
+		Type: "request", To: f.e.localNodeID(), From: f.peer.ID,
+		Route: "/sync/event/" + f.gameID, Method: http.MethodPost,
+		Body: body, Nonce: nonce, AuthMs: time.Now().UnixMilli(),
+	}
+	msg.Auth = e2ee.RequestMAC(key, msg.From, msg.To, msg.Route, msg.Method, msg.Body, msg.Nonce, msg.AuthMs)
 	w := &WanClient{engine: f.e}
-	w.handleMessage(context.Background(), RelayMessage{
-		Type: "sync-event", From: f.peer.ID, GameID: f.gameID, EventType: "sync-complete", Data: raw,
-	})
+	status, result := w.routeRequest(context.Background(), msg)
+	if status != http.StatusOK {
+		t.Fatalf("signed relay sync-complete: %d %+v", status, result)
+	}
+	// A captured copy cannot be replayed to claim a second convergence.
+	if second, _ := w.routeRequest(context.Background(), msg); second != http.StatusUnauthorized {
+		t.Fatalf("replayed relay completion was accepted: HTTP %d", second)
+	}
 }
 
 func (f *raceFixture) lineage(t *testing.T, root string) []string {

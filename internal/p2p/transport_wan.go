@@ -118,6 +118,17 @@ func (t *wanTransport) TriggerPeerPull(peer syncengine.Peer, gameID string) {
 // It travels as a bare send rather than through Request, which is exactly how
 // it kept its plaintext while every routed payload was being sealed around it.
 func (t *wanTransport) ReportSyncEvent(peer syncengine.Peer, gameID, eventType string, data map[string]any) {
+	// Convergence metadata used to be a bare relay frame. Unlike ordinary
+	// routed requests, those frames carried no request MAC or anti-replay
+	// nonce. Reuse the existing authenticated Notify transport, without
+	// inventing another signing protocol. Legacy bare events remain display
+	// only on the receiver.
+	if eventType == "sync-complete" || eventType == "in-sync" {
+		t.wan.Notify(peer.ID, "/sync/event/"+gameID, "POST", map[string]any{
+			"eventType": eventType, "data": data,
+		})
+		return
+	}
 	raw, err := json.Marshal(data)
 	if err != nil {
 		return
