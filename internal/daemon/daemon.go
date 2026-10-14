@@ -693,7 +693,7 @@ func (d *Daemon) TrackGame(game store.Game) (store.Game, error) {
 		// the duplicate-path refusal otherwise wins before the hold path runs.
 		if game.ProvisioningHold && game.ID != "" {
 			if existing, findErr := d.Store.GetGame(game.ID); findErr == nil {
-				if reused, reuseErr := d.reuseHeldGame(existing, game.SavePath); reuseErr == nil {
+				if reused, reuseErr := d.reuseHeldGame(existing, game); reuseErr == nil {
 					return reused, nil
 				}
 			}
@@ -856,11 +856,11 @@ func (d *Daemon) trackProvisioningHold(game store.Game) (store.Game, error) {
 		if game.ID != "" && existing.ID != game.ID {
 			return store.Game{}, fmt.Errorf("%q already tracks this folder", existing.Name)
 		}
-		return d.reuseHeldGame(existing, game.SavePath)
+		return d.reuseHeldGame(existing, game)
 	}
 	if game.ID != "" {
 		if existing, err := d.Store.GetGame(game.ID); err == nil {
-			return d.reuseHeldGame(existing, game.SavePath)
+			return d.reuseHeldGame(existing, game)
 		}
 	}
 	game.AutoSync = false
@@ -870,7 +870,7 @@ func (d *Daemon) trackProvisioningHold(game store.Game) (store.Game, error) {
 	if err := d.Store.CreateHeldGame(game); err != nil {
 		if isDuplicateGameID(err) {
 			if existing, getErr := d.Store.GetGame(game.ID); getErr == nil {
-				return d.reuseHeldGame(existing, game.SavePath)
+				return d.reuseHeldGame(existing, game)
 			}
 		}
 		return store.Game{}, err
@@ -893,10 +893,10 @@ func (d *Daemon) trackProvisioningHold(game store.Game) (store.Game, error) {
 	return created, nil
 }
 
-// reuseHeldGame is a retry of a create that already committed. Same id and
-// same folder returns the existing row. Anything else is a conflict: a live
-// game must not be turned into a hold, and a held game must not be moved.
-func (d *Daemon) reuseHeldGame(existing store.Game, abs string) (store.Game, error) {
+// reuseHeldGame permits an identical retry after an ambiguous create response.
+// A different requested identity or filesystem object is a conflict, not a
+// successful retry. Offer placement must pass the persisted offer identity.
+func (d *Daemon) reuseHeldGame(existing store.Game, requested store.Game) (store.Game, error) {
 	held, err := d.Store.ProvisioningHeld(existing.ID)
 	if err != nil {
 		return store.Game{}, err
@@ -904,14 +904,28 @@ func (d *Daemon) reuseHeldGame(existing store.Game, abs string) (store.Game, err
 	if !held {
 		return store.Game{}, fmt.Errorf("%q already exists", existing.Name)
 	}
-	if !sameSaveLocation(existing.SavePath, abs) {
+	if requested.ID != "" && existing.ID != requested.ID {
+		return store.Game{}, fmt.Errorf("held game id differs from the requested id")
+	}
+	if existing.Name != requested.Name || existing.AppID != requested.AppID {
+		return store.Game{}, fmt.Errorf("held game identity differs from the requested name or app id")
+	}
+	if requested.ActiveBranch != "" && existing.ActiveBranch != requested.ActiveBranch {
+		return store.Game{}, fmt.Errorf("held game branch differs from the requested branch")
+	}
+	if err := refuseSymlinkSave(requested.SavePath); err != nil {
+		return store.Game{}, err
+	}
+	if !sameSaveLocation(existing.SavePath, requested.SavePath) {
 		return store.Game{}, fmt.Errorf("%q is already being configured at %q", existing.Name, existing.SavePath)
 	}
 	return existing, nil
 }
 
 func sameSaveLocation(a, b string) bool {
-	if strings.EqualFold(filepath.Clean(a), filepath.Clean(b)) {
+	// EqualFold is unsafe on a case-sensitive filesystem: Save and save
+	// may be two separate directories. Lexical equality must be exact.
+	if filepath.Clean(a) == filepath.Clean(b) {
 		return true
 	}
 	ai, aerr := os.Stat(a)
