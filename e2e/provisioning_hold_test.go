@@ -347,6 +347,52 @@ func TestProvisioningHold_RejectsUnsafePathsAndDuplicates(t *testing.T) {
 	}
 }
 
+// A held-create retry must not silently adopt a different game identity or
+// a case-different directory. On case-sensitive Linux filesystems these are
+// distinct save trees even though EqualFold considers their strings equal.
+func TestProvisioningHold_RetryRejectsChangedIdentityAndCaseDifferentPath(t *testing.T) {
+	node := testutil.NewTestDaemon(t, "Hold-Retry-Identity")
+	primary := sideDir(t, node, "case-root")
+	other := sideDir(t, node, "CASE-ROOT")
+	a, errA := os.Stat(primary)
+	b, errB := os.Stat(other)
+	if errA != nil || errB != nil {
+		t.Fatalf("stat fixture: %v, %v", errA, errB)
+	}
+	if os.SameFile(a, b) {
+		t.Skip("case-insensitive filesystem cannot test distinct case-only paths")
+	}
+	const id = "held-retry-identity"
+	initial := map[string]any{
+		"id": id, "name": "Correct Game", "appId": "12345",
+		"savePath": primary, "provisioningHold": true,
+	}
+	var got holdGame
+	node.API(http.MethodPost, "/api/games", initial, &got)
+	if !got.ProvisioningHold || got.SavePath != primary {
+		t.Fatalf("initial registration: %+v", got)
+	}
+	// This is a legitimate lost-response retry.
+	node.API(http.MethodPost, "/api/games", initial, &got)
+	for _, changed := range []map[string]any{
+		{"id": id, "name": "Other Game", "appId": "12345", "savePath": primary, "provisioningHold": true},
+		{"id": id, "name": "Correct Game", "appId": "99999", "savePath": primary, "provisioningHold": true},
+		{"id": id, "name": "Correct Game", "appId": "12345", "savePath": other, "provisioningHold": true},
+	} {
+		var failure struct { Error string `json:"error"` }
+		if status := node.APIStatus(http.MethodPost, "/api/games", changed, &failure); status < 400 {
+			t.Fatalf("conflicting held retry accepted: %+v", changed)
+		}
+	}
+	stored, err := node.Daemon.Store.GetGame(id)
+	if err != nil || stored.SavePath != primary || stored.Name != "Correct Game" || stored.AppID != "12345" {
+		t.Fatalf("held registration changed: %+v err=%v", stored, err)
+	}
+	if held, err := node.Daemon.Store.ProvisioningHeld(id); err != nil || !held {
+		t.Fatalf("held state was lost: held=%v err=%v", held, err)
+	}
+}
+
 func TestProvisioningHold_NamedRootsBeforeRelease(t *testing.T) {
 	source := testutil.NewTestDaemon(t, "Roots-Source")
 	bridge := testutil.NewTestDaemon(t, "Roots-Bridge")
