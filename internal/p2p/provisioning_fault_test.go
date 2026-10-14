@@ -38,3 +38,38 @@ func TestSyncAllGamesStopsWhenHoldSetUnreadable(t *testing.T) {
 	e := &Engine{Store: s, Pause: syncpause.New(), Log: func(string, string) {}}
 	e.SyncAllGames(context.Background())
 }
+
+// Staged release is distinct from hold: ordinary automatic retries must
+// respect AutoSync=false even once the durable provisioning hold is gone.
+// A present online relay peer ensures the retry loop reaches its per-game
+// filter without needing a real LAN peer or any transfer. Sync is nil, so
+// an attempted retry fails the test instead of moving data.
+func TestPendingResyncRemainsQueuedWhileAutoSyncDisabled(t *testing.T) {
+	s, err := store.Open(filepath.Join(t.TempDir(), "opensave.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	if err := s.EnsureDefaultSettings(t.TempDir(), t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	const id = "staged-retry"
+	if err := s.CreateHeldGame(store.Game{ID: id, Name: "Staged Retry", SavePath: t.TempDir()}); err != nil {
+		t.Fatal(err)
+	}
+	released, err := s.ReleaseProvisioningMode(id, false)
+	if err != nil || !released {
+		t.Fatalf("staged release: released=%v err=%v", released, err)
+	}
+	if err := s.UpsertPeer(store.Peer{
+		ID: "peer", Name: "Peer", Address: "relay", Status: "online",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	e := &Engine{Store: s, Pause: syncpause.New(), Log: func(string, string) {},
+		pendingResync: map[string]bool{id: true}}
+	e.retryPendingResyncs(context.Background())
+	if !e.pendingResync[id] {
+		t.Fatal("disabled AutoSync must retain interrupted-sync retry for later activation")
+	}
+}
