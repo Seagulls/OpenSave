@@ -62,11 +62,13 @@ func (s *Server) handlePlaceOfferedGame(w http.ResponseWriter, r *http.Request) 
 	}
 	hold := body.ProvisioningHold || (body.AutoSync != nil && !*body.AutoSync)
 	if len(offers) == 0 && hold {
-		// The first place committed and the response was lost. Repeating it
-		// must not 404 into a second attempt that invents another game.
-		if _, err := s.Daemon.Store.GetGame(gameID); err == nil {
+		// The first place committed and the response was lost. Only an
+		// identical held registration can be returned. Recover the stored
+		// offered identity, rather than inventing Name=gameID on a retry.
+		if existing, err := s.Daemon.Store.GetGame(gameID); err == nil {
 			game, err := s.Daemon.TrackGame(store.Game{
-				ID: gameID, Name: gameID, SavePath: body.Path, ProvisioningHold: true,
+				ID: gameID, Name: existing.Name, AppID: existing.AppID,
+				SavePath: body.Path, ProvisioningHold: true,
 			})
 			if err != nil {
 				writeError(w, http.StatusConflict, err.Error())
