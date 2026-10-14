@@ -379,7 +379,9 @@ func TestProvisioningHold_RetryRejectsChangedIdentityAndCaseDifferentPath(t *tes
 		{"id": id, "name": "Correct Game", "appId": "99999", "savePath": primary, "provisioningHold": true},
 		{"id": id, "name": "Correct Game", "appId": "12345", "savePath": other, "provisioningHold": true},
 	} {
-		var failure struct { Error string `json:"error"` }
+		var failure struct {
+			Error string `json:"error"`
+		}
 		if status := node.APIStatus(http.MethodPost, "/api/games", changed, &failure); status < 400 {
 			t.Fatalf("conflicting held retry accepted: %+v", changed)
 		}
