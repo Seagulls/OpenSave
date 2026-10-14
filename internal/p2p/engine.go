@@ -623,6 +623,17 @@ func (e *Engine) retryPendingResyncs(ctx context.Context) {
 			e.pendingMu.Unlock()
 			continue
 		}
+		// This is automatic initiation, not an operator-requested sync.
+		// Staged release keeps AutoSync off until the caller explicitly
+		// accepts the result; retain pending work for that later transition.
+		game, gameErr := e.Store.GetGame(id)
+		if gameErr != nil {
+			e.Log("warn", fmt.Sprintf("not retrying %s: game state could not be read: %v", id, gameErr))
+			continue
+		}
+		if !game.AutoSync {
+			continue
+		}
 		e.Log("info", fmt.Sprintf("retrying interrupted sync for %s", id))
 		results, err := e.Sync.SyncGame(ctx, id, online)
 		if err == nil {
