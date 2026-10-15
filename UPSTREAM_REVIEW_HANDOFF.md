@@ -4,7 +4,7 @@ Updated after the staged-release and mixed-version tranche. This file stays
 on `review/upstream-handoff` only. It is not part of either code branch.
 
 No Steam Deck, Bazzite, Raspberry Pi, installed daemon, or real save was
-contacted. No upstream PR was opened. `Seagulls/Savesync` was not modified.
+contacted. No upstream PR was opened. No unrelated non-public repository was accessed.
 No force-push.
 
 Toolchain for every command below: `go version go1.27.1-X:nodwarf5 linux/amd64`.
@@ -15,8 +15,8 @@ was not downloaded. Linux only. No Windows or macOS run.
 
 | Branch | Base | Tip | Pushed |
 | --- | --- | --- | --- |
-| `feat/atomic-safe-game-provisioning` | `346d9bda0749fb57b48fd266f13e535af80f0285` | `2fee76ffe91e9387d6ee717727a6b85779ddf0fd` | `Seagulls/OpenSave` only |
-| `fix/agreed-base-precedes-mtime` | same base | `aee1c1add543a80e5f400fcde2f4e466659c0ac6` | `Seagulls/OpenSave` only |
+| `feat/atomic-safe-game-provisioning` | `346d9bda0749fb57b48fd266f13e535af80f0285` | `2fee76ffe91e9387d6ee717727a6b85779ddf0fd` | public fork only |
+| `fix/agreed-base-precedes-mtime` | same base | `aee1c1add543a80e5f400fcde2f4e466659c0ac6` | public fork only |
 | `review/upstream-handoff` | docs only | this commit | docs only |
 
 Previous reviewed tips `af05e65` and `8d893ff` are parents of the tips above.
@@ -28,8 +28,8 @@ Opened against `Liquid-co/OpenSave:main` (`346d9bda`). Not merged.
 
 | PR | Draft | Head |
 | --- | --- | --- |
-| https://github.com/Liquid-co/OpenSave/pull/42 | yes | `aee1c1add543a80e5f400fcde2f4e466659c0ac6` `fix/agreed-base-precedes-mtime` |
-| https://github.com/Liquid-co/OpenSave/pull/43 | yes | `2fee76ffe91e9387d6ee717727a6b85779ddf0fd` `feat/atomic-safe-game-provisioning` |
+| https://redirect.github.com/Liquid-co/OpenSave/pull/42 | yes | `aee1c1add543a80e5f400fcde2f4e466659c0ac6` `fix/agreed-base-precedes-mtime` |
+| https://redirect.github.com/Liquid-co/OpenSave/pull/43 | yes | `2fee76ffe91e9387d6ee717727a6b85779ddf0fd` `feat/atomic-safe-game-provisioning` |
 
 Vercel reported FAILURE on both. The check URL is a third-party authorize page, not an OpenSave test result.
 
@@ -48,7 +48,7 @@ Files:
 
 What changed and why:
 
-- Upstream tests no longer use Bazzite, Deck, or SaveSync names. The star is
+- Upstream tests no longer use deployment-specific machine or product names. The star is
   `leafA` / `hub` / `leafB`.
 - A direct held sync that returns anything other than `ErrProvisioning` fails
   the test. The HTTP refusal must be 409 with reason `provisioning`.
@@ -78,13 +78,13 @@ renamed to `TestAgreedBaseOverridesNewerMtime` because the old name described
 the opposite result. A remote deletion of an agreed file is not pushed back.
 
 Deliberately not done: version vectors, peer-targeted sync, a downgrade
-migration, SaveSync-specific APIs, session-code changes.
+migration, client-specific APIs, session-code changes.
 
 Stock session failure, confirmed independently on `346d9bda` with
 `go test -count=8 -timeout 8m ./internal/daemon` against a `git archive` of
 that commit. Signature: `TestSessionNamesTheSnapshotAlreadyTaken` and
 `want the watcher`. Evidence:
-`/home/guy/Documents/ai/Savesync-logs/opensave-stock-session-baseline-20261009-113606Z.log`.
+`[local path omitted]`.
 The provisioning package gate used
 `-skip '^TestSessionNamesTheSnapshotAlreadyTaken$'` only. That is not a green
 unmodified suite. The mtime package gate did not include `./internal/daemon`
@@ -99,12 +99,12 @@ was empty on the changed files.
 `go test ./...` remains blocked by `cmd/opensave-app` embedding
 `frontend/dist`, which is not in the clone. Not stubbed.
 
-Combined local tree `d870af1` (not pushed) ran `TestSaveSyncStar*` RC=0.
-Log: `/home/guy/Documents/ai/Savesync-logs/savesync-grok-opensave-three-node.log`.
+Combined local tree `[unpublished worktree]` (not pushed) ran unpublished multi-device scenario tests RC=0.
+Log: `[local path omitted]`.
 Offline round trip PASS. Dual-writer both orders PASS with status conflict
 and unique files kept. Idle-bridge mtime rollback PASS.
 
-No live device, real save, or SaveSync source was touched. No upstream PR
+No live device, real save, or separate downstream client source was touched. No upstream PR
 was opened.
 
 Compare:
@@ -127,8 +127,8 @@ Mtime commits after stock:
 
 Throwaway combined tree, **not pushed**:
 
-- path: `/tmp/kilo/opensave-combined2`
-- local SHA: `d7ef7c67490bdf6397a5d9f626d045de90c9cfcf`
+- path: `[local path omitted]`
+- local SHA: `[unpublished local revision]`
 - parents: `af05e65` and `8d893ff`
 - only conflict: `CHANGELOG.md`, both notes kept
 
@@ -143,7 +143,7 @@ Throwaway combined tree, **not pushed**:
 | Default release means "no transfer until explicit sync" | **Not true.** Witness: `TestProvisioningHold_DefaultReleaseLetsReconcileSync`. Reconcile/`SyncAllGames` copies bytes after a default release. |
 | Staged release | Supported and tested. Hold cleared, AutoSync left off, reconcile/restart/file write do not copy. Explicit `POST /sync` does. A still-held third peer refuses. Both writer orders. |
 | Peer-targeted `SyncGame(game, peer)` | Unsupported. Explicit sync still contacts every online peer. Unheld peers participate. Held peers refuse. Do not add this in this PR. |
-| Same canonical id on the Bridge without an offer | Supported as a local API (`id` only while held). Not automatic. SaveSync must call it. |
+| Same canonical id on the intermediate peer without an offer | Supported as a local API (`id` only while held). Not automatic. separate downstream client must call it. |
 | Convert an already tracked game into a hold | Unsupported. Fails, leaves AutoSync and bytes alone. |
 | Mixed stock client to patched held server | Supported for the cases run. Manifest 409, delete 409, stock sync status `error`, files unchanged. |
 | Stock daemon on a patched database | **Unsafe.** Stock has no hold field and serves the held manifest (HTTP 200, file hash included). |
@@ -235,7 +235,7 @@ stubbed. Not counted green.
 
 Mixed-version log, two processes, isolated `HOME`, ports 18421/18422/18423:
 
-`/home/guy/Documents/ai/Savesync-logs/savesync-grok-opensave-mixed-version.log`
+`[local path omitted]`
 
 ```text
 MANIFEST_STATUS=409 configuring message, not "not found"
@@ -260,33 +260,33 @@ linux/arm64 5ff686835a8608e481e6d8af0447f5547dd9890fca693c462d9fe01a52aad64a
 
 ## 6. Combined checkout
 
-`/tmp/kilo/opensave-combined2` at `d7ef7c6`, not pushed.
+`[local path omitted]` at `d7ef7c6`, not pushed.
 
 ```text
-go test -count=1 -timeout 15m -run 'TestSaveSyncStar|TestProvisioningHold_|TestAgreedBase|TestBaseFirst' ./e2e/ ./internal/p2p/syncengine/
+go test -count=1 -timeout 15m -run 'TestProvisioningHold_|TestAgreedBase|TestBaseFirst' ./e2e/ ./internal/p2p/syncengine/
 RC=0
-go test -count=1 -timeout 8m -v -run '^TestSaveSyncStar' ./e2e
+[local-only test command omitted]
 RC=0
 ```
 
-Log: `/home/guy/Documents/ai/Savesync-logs/savesync-grok-opensave-three-node.log`
+Log: `[local path omitted]`
 
-- `TestSaveSyncStarOfflineRoundTrip` PASS, files=4
-- `TestSaveSyncStarDualWriterPreservesBoth` PASS both orders, status=conflict, unique files kept
-- `TestSaveSyncStarIdleBridgeMtimeCannotRollback` PASS
+- `Offline round-trip case:` PASS, files=4
+- `Dual-writer case:` PASS both orders, status=conflict, unique files kept
+- `Intermediate-peer rollback case:` PASS
 
-Three-node files were copied into the throwaway `e2e/` only. SaveSync was not edited.
+Three-node files were copied into the throwaway `e2e/` only. separate downstream client was not edited.
 
 ## 7. Draft PR text
 
 Do not open these yet.
 
-### Issue #40
+### Provisioning hold proposal
 
 Title: Hold a new game until it is explicitly released
 
 ```markdown
-Fixes #40
+Scope: provisioning hold
 
 `autoSync: false` after a normal track is not safe. A paired device can still
 request the manifest, and pause does not survive `daemon.New`. Creation and
@@ -314,12 +314,12 @@ A stock build serving this database will serve the held save. Do not downgrade
 a device that has a held game.
 ```
 
-### Issue #41
+### Agreed-base proposal
 
 Title: Prefer the agreed save base over a misleading mtime
 
 ```markdown
-Fixes #41
+Scope: agreed-base precedence
 
 When one whole manifest is still the confirmed common version and the other
 has changed, the changed side wins even if the unchanged files have a later
@@ -336,9 +336,9 @@ and a named root.
 
 | Gate | Decision |
 | --- | --- |
-| (a) Issue #41 PR review | **GO** for review. Not a hardware explanation. Pre-existing `TestSessionNamesTheSnapshotAlreadyTaken` fails on this tip and on stock; it is not part of this diff. |
-| (b) Issue #40 PR review | **GO** for review of the hold and staged release. **NO-GO** as unattended SaveSync/Bridge enablement. Default release lets reconcile sync. Explicit sync is not peer-targeted. The Bridge id is not created automatically. |
-| (c) Combined isolated testing | **GO**. Local `d870af1` (parents `eb60926` and `aee1c1a`) passed `TestSaveSyncStar*`. Not a PR. |
+| (a) Agreed-base proposal PR review | **GO** for review. Not a hardware explanation. Pre-existing `TestSessionNamesTheSnapshotAlreadyTaken` fails on this tip and on stock; it is not part of this diff. |
+| (b) Provisioning hold proposal PR review | **GO** for review of the hold and staged release. **NO-GO** as unattended separate downstream client/intermediate peer enablement. Default release lets reconcile sync. Explicit sync is not peer-targeted. The intermediate peer id is not created automatically. |
+| (c) Combined isolated testing | **GO**. Local `[unpublished worktree]` (temporary combined revision) passed unpublished multi-device scenario tests. Not a PR. |
 | (d) Live hardware | **NO-GO**. |
 
 ## 9. What to inspect next
@@ -350,11 +350,11 @@ and a named root.
 5. Staged release is local AutoSync off, not a peer lock. `TestProvisioningHold_StagedReleaseAllowsPeerInitiatedSync` is the contract.
 6. Do not treat #29/#30 as done.
 
-SaveSync integration, contract only, no code in this tranche:
+separate downstream client integration, contract only, no code in this tranche:
 
-1. Keep `new-protection-paired-topology` fail-closed until this is merged and SaveSync calls it.
+1. Keep the downstream integration's fail-closed guard fail-closed until this is merged and separate downstream client calls it.
 2. Source: `POST /api/games` with an explicit slug, `provisioningHold: true`.
-3. Bridge: the same id and a Bridge-local path. There will be no offer.
+3. intermediate peer: the same id and a intermediate-peer local path. There will be no offer.
 4. Configure roots while held.
 5. Release both with `{"autoSync": false}`. Leave the other endpoint held.
 6. `POST /api/games/{id}/sync` on the source. Compare hashes. The third peer must still be held, because this sync contacts every online peer.
