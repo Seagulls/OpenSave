@@ -19,9 +19,9 @@ const fixtureJSON = `{
     "port": 8383,
     "syncInterval": 5000,
     "syncOnWatch": true,
-    "dataDir": "C:\\Users\\Siva\\.opensave",
-    "backupsDir": "C:\\Users\\Siva\\.opensave\\backups",
-    "syncBackupsDir": "C:\\Users\\Siva\\.opensave\\backups",
+    "dataDir": "C:\\Users\\ExampleUser\\.opensave",
+    "backupsDir": "C:\\Users\\ExampleUser\\.opensave\\backups",
+    "syncBackupsDir": "C:\\Users\\ExampleUser\\.opensave\\backups",
     "autoDeleteBackups": false,
     "autoDeleteDays": 30,
     "autoSyncOnTrack": false,
@@ -56,7 +56,7 @@ const fixtureJSON = `{
     "elden-ring": {
       "id": "elden-ring",
       "name": "Elden Ring",
-      "savePath": "C:\\Users\\Siva\\AppData\\Roaming\\EldenRing",
+      "savePath": "C:\\Users\\ExampleUser\\AppData\\Roaming\\EldenRing",
       "activeBranch": "ng-plus",
       "autoSync": true,
       "maxSnapshots": 10,
@@ -70,7 +70,7 @@ const fixtureJSON = `{
               "timestamp": "2026-05-01T10:00:00.000Z",
               "comment": "before boss",
               "isSystemAuto": false,
-              "zipPath": "C:\\Users\\Siva\\.savesync\\backups\\elden-ring\\main\\snap_1700000000001.zip",
+              "zipPath": "C:\\Users\\ExampleUser\\.savesync\\backups\\elden-ring\\main\\snap_1700000000001.zip",
               "sizeBytes": 123456,
               "branch": "main"
             }
@@ -84,7 +84,7 @@ const fixtureJSON = `{
               "timestamp": "2026-06-01T10:00:00.000Z",
               "comment": "",
               "isSystemAuto": true,
-              "zipPath": "C:\\Users\\Siva\\.opensave\\backups\\elden-ring\\ng-plus\\snap_1700000000002.zip",
+              "zipPath": "C:\\Users\\ExampleUser\\.opensave\\backups\\elden-ring\\ng-plus\\snap_1700000000002.zip",
               "sizeBytes": 654321,
               "branch": "ng-plus"
             }
@@ -208,7 +208,7 @@ func TestRun_FullImport(t *testing.T) {
 		t.Fatalf("expected 1 snapshot on main, got %d", len(mainSnaps))
 	}
 	// The stale .savesync zipPath must get the same substitution db.js applies.
-	wantZip := `C:\Users\Siva\.opensave\backups\elden-ring\main\snap_1700000000001.zip`
+	wantZip := `C:\Users\ExampleUser\.opensave\backups\elden-ring\main\snap_1700000000001.zip`
 	if mainSnaps[0].ZipPath != wantZip {
 		t.Errorf("zipPath = %q, want %q", mainSnaps[0].ZipPath, wantZip)
 	}
