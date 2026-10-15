@@ -1,56 +1,68 @@
-## Problem
+## Summary
 
-A snapshot ZIP can pass OpenSave's CRC/integrity verification yet be **impossible to extract** (for example, a file and directory collision). The restore path may clear existing saves **before** it discovers the invalid archive topology. Restore returns an error, but the original live save files have already disappeared.
+\`Manager.Restore\` verifies an archive's ZIP checksums, but a **CRC-valid ZIP can still be structurally impossible to extract**. The restore implementation may **clear existing live saves before discovering that extraction must fail**. It returns an error with the original working save files already removed.
 
-**Verified on 2026-10-15:** Linux amd64, Go 1.26.4, OpenSave commit [`346d9bda0749`](https://github.com/Liquid-co/OpenSave/commit/346d9bda0749fb57b48fd266f13e535af80f0285). The relevant upstream `main` implementation files have identical Git blob hashes to the tested revision. All inputs are synthetic and under Go `t.TempDir()`; no real game saves or user data were used.
+A minimal reproducer is a ZIP with a regular file \`block\` followed by \`block/child.sav\`: both entries have valid CRCs, but \`block\` cannot simultaneously be a file and a parent directory. This is a **validation-order and transactional restore bug**, not an arbitrary-file-write or successful path-traversal exploit.
+
+## Environment and test evidence
+
+- **Source:** OpenSave commit \`346d9bda0749fb57b48fd266f13e535af80f0285\`.
+- **Execution:** Linux amd64, Go 1.26.4. Both regressions run on synthetic files under \`t.TempDir()\`; no actual user save data is involved.
+- **Upstream comparison (2026-10-15):** \`snapshot.go\`, \`zip.go\`, \`zip_roots.go\` and the existing test helper were blob-identical between the audited revision and upstream \`main\`.
+- **Result:** both single-root \`Manager.Restore\` and mapped-additional-root \`UnzipRoots\` tests reproduce loss of existing working files. Existing successful single/multi-root restore controls passed during focused validation.
 
 ## Minimal reproduction
 
-1. Register a disposable game, write `important.sav = CURRENT-ONLY`, and create snapshot `S1`.
-2. Replace the saved ZIP at `S1.ZipPath` with a standard, checksum-valid ZIP containing these entries **in order**:
+1. Register a disposable game \`game1\` with \`important.sav = CURRENT-ONLY\`; create snapshot \`S1\`.
+2. Replace \`S1.ZipPath\` with a syntactically valid ZIP containing these entries, **in this order**:
 
-   ```text
-   block            (regular file with valid CRC)
-   block/child.sav  (regular file with valid CRC)
-   ```
+   \`\`\`text
+   block            (ordinary file; valid CRC)
+   block/child.sav  (ordinary file; valid CRC)
+   \`\`\`
 
-   On disk, `block` cannot simultaneously be a regular file and a parent directory.
+3. Verify \`VerifyArchive(S1.ZipPath)\` returns \`nil\`. The member bytes are valid, but the file/directory layout is impossible.
+4. Call \`Manager.Restore("game1", S1.ID)\`. Read the returned error and inspect \`important.sav\`.
+5. **Multi-root variant:** call \`UnzipRoots\` with a primary save root and a mapped \`config\` location. Put the impossible file/directory collision under \`config\`, with existing unrelated files in **both** roots. Inspect them after the extraction error.
 
-3. Confirm `VerifyArchive(S1.ZipPath)` returns nil.
-4. Call `Manager.Restore("game1", S1.ID)`. Inspect both the returned extraction error and the original live file.
-5. Independently test `UnzipRoots` with an additional named root and the same collision under that root to check cross-root preservation.
+**Public executable tests:** [single-root restore and multi-root failure preservation](https://github.com/Seagulls/OpenSave/blob/58e46e03ef388cfb2ad17b807e5c64b8235b3cf0/internal/snapshot/zip_restore_regression_test.go). Both are deliberately RED until the implementation preserves the original working tree on failed extraction.
 
-**Public runnable RED tests:** [checksum-valid ZIP collision through `Manager.Restore` and multi-root `UnzipRoots`](https://github.com/Seagulls/OpenSave/blob/58e46e03ef388cfb2ad17b807e5c64b8235b3cf0/internal/snapshot/zip_restore_regression_test.go). They use only synthetic file contents, the project's existing public snapshot test fixture and `t.TempDir()`.
-
-```bash
-# With the linked test file in internal/snapshot/:
+\`\`\`bash
+# With the linked regression file placed in internal/snapshot:
 go test -count=1 ./internal/snapshot -run '^TestRegression(RestoreValid|UnzipExtra)'
-```
+\`\`\`
 
-### Expected vs actual
+### Expected versus observed
 
-| | Expected | Observed |
+| Stage / invariant | Expected | Observed |
 |---|---|---|
-| ZIP preflight | CRC verification may pass; structural validation must still occur before mutation | `VerifyArchive` passes |
-| Extraction | Returns an error for impossible `block/child.sav` path | Returns an error |
-| Current save files | Original bytes remain untouched when extraction fails | `important.sav` is missing |
-| Multiple mapped roots | No existing root loses files on a late extraction error | Both primary and additional-root live files were removed |
+| CRC check | Check member integrity; CRC-valid ZIP may pass | \`VerifyArchive\` returns \`nil\` |
+| Structural validation | Reject impossible directory topology **before** touching saves | Collision is discovered **during extraction** |
+| Manager restore | Return extraction error; preserve original \`important.sav\` | Error returned; \`important.sav\` is **missing** |
+| Additional-root extraction | Error must leave **all** current roots intact | Files in both primary and \`config\` roots are removed |
 
-The two cases were repeated on the audited revision and are failing for their intended safety assertions. Existing valid single/multi-root restore controls continue to pass.
+These assertions fail reproducibly using disposable test directories. This is **not** a claim that arbitrary archives pass all checks: the precise point is that the currently used CRC check does not establish that a full restore can succeed.
 
-**Impact and recovery boundary:** the working save tree can disappear after an unsuccessful restore. A safety snapshot can provide a recovery path, so the demonstrated defect is a failed *nontransactional restore*, **not** proof of universally irreversible data loss. This is **not** an archive path-traversal escape.
+## Code-path analysis
 
-## Why CRC validation is not enough
+[\`Manager.Restore\`](https://github.com/Liquid-co/OpenSave/blob/346d9bda0749fb57b48fd266f13e535af80f0285/internal/snapshot/snapshot.go#L727) opens the archive and calls \`VerifyArchive\` before starting extraction. But CRC integrity checks the compressed member data, **not** whether the archive's member paths can coexist safely on disk.
 
-[`Manager.Restore`](https://github.com/Liquid-co/OpenSave/blob/main/internal/snapshot/snapshot.go#L727) calls `VerifyArchive`, then extracts through [`UnzipRoots`](https://github.com/Liquid-co/OpenSave/blob/main/internal/snapshot/zip_roots.go#L198) or [`UnzipTo`](https://github.com/Liquid-co/OpenSave/blob/main/internal/snapshot/zip.go). These paths may clear the live destination *before* all archive entries are checked for safe path topology and successful extraction.
+The [\`UnzipRoots\`](https://github.com/Liquid-co/OpenSave/blob/346d9bda0749fb57b48fd266f13e535af80f0285/internal/snapshot/zip_roots.go#L198) implementation opens the ZIP, clears the primary save location, and clears an additional mapped root on its first matching entry, **before** the loop finishes calling \`extractEntryAs\`. Likewise, [\`UnzipTo\`](https://github.com/Liquid-co/OpenSave/blob/346d9bda0749fb57b48fd266f13e535af80f0285/internal/snapshot/zip.go#L239) can clear a single-root target before extracting every entry.
 
-Integrity of individual ZIP members does not establish that the entire archive can be safely restored.
+When a later member cannot be created due to \`block\` already existing as a file, the error is returned after the original directory contents have already gone. With multiple roots, this can leave both an unrelated primary root and the failing secondary root empty or partially restored.
 
-## Suggested acceptance criteria
+A separate regression using a rejected \`../bad.sav\` member established the **ordering hazard** for unsafe paths; it did **not** show an actual escape from the extraction destination. This report centers on the cleaner, CRC-valid topology collision instead.
 
-- [ ] Reject invalid entry names, file/directory collisions and invalid mapped-root layouts **before** touching live files.
-- [ ] Stage and verify extraction to temporary locations before committing, or implement complete rollback across all mapped roots.
-- [ ] On any extraction failure, preserve original file contents and restoration metadata.
-- [ ] Make the linked single-root and multi-root RED cases pass, without breaking valid-archive restoration.
+## Impact and recovery limitation
 
-These regression tests intentionally exclude production paths, credentials, identifiers and diagnostic logs.
+A failed restore can destroy the **active working save**, precisely when users are attempting recovery. In an ordinary workflow a pre-restore safety snapshot may hold the displaced bytes, so we do **not** claim that every occurrence is irreversible. The bug is that the operation reports failure **after** mutating the original files.
+
+## Suggested fix and acceptance criteria
+
+- [ ] Validate archive member names, file types, path traversal, path collisions, and mapped-root layout across the **whole archive** before any destination is cleared.
+- [ ] Stage and verify a complete extraction in temporary directories; commit all affected roots safely, or implement rollback robust to later failures and separate filesystems.
+- [ ] On any extract/validation error, preserve existing file contents and relevant state across **all** configured roots.
+- [ ] Make the two public RED regressions pass, while preserving successful restore, missing-archive preflight and normal multi-root behavior.
+- [ ] Add a regression for extraction failure after several valid entries have been written, not just the first conflicting path.
+
+**Related, not duplicate:** [#59](https://github.com/Liquid-co/OpenSave/issues/59) concerns switching branches *before validating the incoming snapshot* and then incorrectly returning success. This report is the separate nontransactional ZIP extraction path.
