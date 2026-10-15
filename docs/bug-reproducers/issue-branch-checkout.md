@@ -1,48 +1,71 @@
-## Problem
+## Summary
 
-Switching to a branch whose recorded snapshot ZIP has gone missing or become corrupt **clears the active save, advances `ActiveBranch`, and returns success** even though the destination cannot be restored.
+Switching to a branch whose latest snapshot record references a **missing or corrupt ZIP** clears the current live save directory and advances the active branch even though the target could not be restored. The manager returns success, and the real CLI can print a successful checkout message with an **empty working save**.
 
-This is not the intended behavior of switching to a deliberately empty branch: the target has a snapshot record but its backing archive is unavailable. The resulting CLI message misleadingly states that checkout succeeded.
+The target branch is not intentionally empty: it has a recorded snapshot, but its archive is unavailable. There are two related faults in one state transition: **destructive work occurs before target validation** and **target restore errors are not propagated**.
 
-**Verified on 2026-10-15:** Linux amd64, Go 1.26.4, OpenSave commit [`346d9bda0749`](https://github.com/Liquid-co/OpenSave/commit/346d9bda0749fb57b48fd266f13e535af80f0285). The relevant upstream `main` implementation files have identical Git blob hashes to the tested revision. All inputs are synthetic and under Go `t.TempDir()`; no real game saves or user data were used.
+## Environment and evidence
+
+- **Source:** OpenSave commit \`346d9bda0749fb57b48fd266f13e535af80f0285\`.
+- **Execution:** Linux amd64, Go 1.26.4, disposable file trees. Test fixtures contain only synthetic strings; no personal saves, credentials, or host paths.
+- **Upstream comparison (2026-10-15):** \`snapshot.go\`, \`zip.go\`, \`zip_roots.go\` and the snapshot test helper have the same Git blob hashes on upstream \`main\` as on the tested source.
+- **Reproduction:** two isolated manager tests (missing and corrupt ZIP) plus a separate real CLI/daemon reproduction. Both manager tests fail on the audited implementation for the intended preservation assertions.
 
 ## Reproduction
 
-1. Register a test game with `slot.sav = INITIAL` and create a second seeded branch `other`.
-2. Change the active save to `slot.sav = CURRENT-ONLY` (no new manual snapshot).
-3. Remove `other`'s snapshot ZIP; repeat separately with the ZIP replaced by invalid bytes.
-4. Call `Manager.SwitchBranch("game1", "other")` and inspect the returned error, `slot.sav` and `game.ActiveBranch`.
+1. In a disposable game called \`game1\`, write \`slot.sav = INITIAL\`. Create a second branch \`other\` with a seed snapshot, then return to \`main\`.
+2. Write \`slot.sav = CURRENT-ONLY\` on \`main\`; do **not** add a manual snapshot containing these newer bytes.
+3. Find the latest snapshot metadata for \`other\`.
+4. **Variant A:** delete the ZIP at that snapshot's \`ZipPath\`. **Variant B:** replace it with non-ZIP bytes.
+5. Call \`Manager.SwitchBranch("game1", "other")\`.
+6. Check the returned error, original \`slot.sav\`, and \`game.ActiveBranch\`. Repeat through the CLI if desired.
 
-**Public self-contained regression cases (in the project's `internal/snapshot` test package):** [missing and corrupt target ZIP tests](https://github.com/Seagulls/OpenSave/blob/58e46e03ef388cfb2ad17b807e5c64b8235b3cf0/internal/snapshot/branch_checkout_regression_test.go). The tests reuse the existing public `setup(t)` test helper and are completely isolated from user saves.
+**Public executable tests:** [missing and corrupt destination archive regressions](https://github.com/Seagulls/OpenSave/blob/58e46e03ef388cfb2ad17b807e5c64b8235b3cf0/internal/snapshot/branch_checkout_regression_test.go). They use the repository's existing \`setup(t)\` and \`writeSave(t)\` test helpers and synthetic \`t.TempDir()\` data; no external games or hardware are needed.
 
-```bash
-# With the linked test file in internal/snapshot/:
+\`\`\`bash
+# With the linked regression file placed in internal/snapshot:
 go test -count=1 ./internal/snapshot -run '^TestRegressionBranchSwitch'
-```
+\`\`\`
 
-### Expected vs actual
+### Expected versus observed
 
-| | Expected | Observed |
+| Check | Expected on failed checkout | Observed on affected implementation |
 |---|---|---|
-| Checkout error | Non-nil error; current save bytes unchanged | `SwitchBranch` returns nil |
-| Live save | `slot.sav = CURRENT-ONLY` | `slot.sav` missing |
-| Active branch | Remains `main` | Advances to `other` |
+| API result | Non-nil error identifying the unavailable destination archive | \`SwitchBranch\` returns \`nil\` |
+| \`slot.sav\` | Remains present, with \`CURRENT-ONLY\` bytes | File is **missing** |
+| \`ActiveBranch\` | Remains \`main\` | Becomes \`other\` |
+| CLI exit / message | Nonzero exit and unambiguous failure | Exit **0**, followed by "Switched to branch \\"other\\"" |
 
-Both cases are reproducible and intentionally **RED** until the defect is fixed. The existing positive tests for a normal branch switch and a refused switch when the *outgoing* backup cannot be taken continue to pass.
+The same misbehavior was observed with **both** a missing and a corrupt ZIP. The positive branch-switching controls, including rejection when the *outgoing* safety backup cannot be created, passed in the focused validation.
 
-An independent end-to-end test using a real CLI and daemon also observed a **zero exit status** and a success message after the active save disappeared.
+### Independent CLI/daemon observation
 
-**Recovery limitation:** in that real CLI run, an outgoing auto-snapshot contained the original current save and could be used to recover it. This report demonstrates destructive active-state mutation and erroneous success reporting; it does **not** claim that this particular run irreversibly lost all copies of the data.
+In a separate isolated process-level reproduction, the CLI returned success even though the daemon logged the failed incoming restore:
 
-## Failure boundary
+\`\`\`text
+checkout exit status: 0
+active slot.sav before: present (new local progress)
+active slot.sav after:  MISSING
+[snapshot] failed to restore branch snapshot: ... file does not exist
+Switched to branch "other"
+\`\`\`
 
-In [`SwitchBranch`](https://github.com/Liquid-co/OpenSave/blob/main/internal/snapshot/snapshot.go#L904), the current save roots are cleared and the active branch is switched **before** the incoming snapshot ZIP has been fully validated and staged. The later restore error is logged but does not abort/undo the switch.
+This is a sanitized representation of the observed output; user-specific paths and save contents are deliberately excluded.
 
-## Suggested acceptance criteria
+**Recoverability qualification:** that CLI run also took an outgoing automatic snapshot containing the current progress, making recovery possible. This report documents **unsafe mutation of the active save and false success**, **not** proven irreversible destruction of every copy.
 
-- [ ] Preflight that the destination archive exists and is readable/extractable *before* changing live saves or active branch metadata.
-- [ ] On target ZIP errors, preserve every current mapped save root and `ActiveBranch`, and return a meaningful API/CLI failure.
-- [ ] Stage/commit or roll back the full transition so a partial extraction failure is not falsely reported as a successful checkout.
-- [ ] Make both linked regression cases pass without breaking normal seeded and deliberately empty branch switching.
+## Root-cause analysis
 
-Related but separate finding: failed restore after ZIP extraction starts can also remove current saves; that is a distinct test case, not a duplicate of this checkout preflight bug.
+[\`SwitchBranch\`](https://github.com/Liquid-co/OpenSave/blob/346d9bda0749fb57b48fd266f13e535af80f0285/internal/snapshot/snapshot.go#L904) correctly attempts a protective snapshot of the **outgoing** state, then calls \`clearSavePathGuarded\` for the current save and additional roots and switches \`ActiveBranch\`. Only **afterward** does it call \`OpenArchive\` and \`UnzipRoots\` for the incoming branch. If the incoming archive fails to open or extract, the error is printed to stderr but checkout still returns \`nil\`.
+
+A valid outgoing backup does not mean the **incoming target** is valid. The current ordering makes a missing destination archive a destructive operation rather than a failed no-op.
+
+## Suggested fix and acceptance criteria
+
+- [ ] Read target branch/snapshot metadata and preflight the target ZIP **before** clearing any current root or changing \`ActiveBranch\`.
+- [ ] Validate and stage incoming contents (including all mapped roots), or provide durable rollback if extraction/commit fails.
+- [ ] A missing, unreadable, corrupt, or unextractable target ZIP must leave current file contents, branch selection, and sync metadata consistent and return a meaningful error.
+- [ ] CLI must report failure and exit nonzero when its target cannot be restored.
+- [ ] Both public RED regression tests pass; normal seeded/empty branch switching and outgoing-backup safety controls remain passing.
+
+**Related, not duplicate:** [#60](https://github.com/Liquid-co/OpenSave/issues/60) concerns a restore ZIP that *opens and verifies* but fails later during extraction; this issue additionally covers branch selection and suppressed checkout errors.
