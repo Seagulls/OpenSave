@@ -99,7 +99,7 @@ was empty on the changed files.
 `go test ./...` remains blocked by `cmd/opensave-app` embedding
 `frontend/dist`, which is not in the clone. Not stubbed.
 
-Combined local tree `[unpublished worktree]` (not pushed) ran unpublished multi-device scenario tests RC=0.
+The unpublished disposable worktree passed isolated three-device scenario checks (exit code 0).
 Log: `[local path omitted]`.
 Offline round trip PASS. Dual-writer both orders PASS with status conflict
 and unique files kept. Idle-bridge mtime rollback PASS.
@@ -128,7 +128,7 @@ Mtime commits after stock:
 Throwaway combined tree, **not pushed**:
 
 - path: `[local path omitted]`
-- local SHA: `[unpublished local revision]`
+- local revision identifier: not published
 - parents: `af05e65` and `8d893ff`
 - only conflict: `CHANGELOG.md`, both notes kept
 
@@ -143,7 +143,7 @@ Throwaway combined tree, **not pushed**:
 | Default release means "no transfer until explicit sync" | **Not true.** Witness: `TestProvisioningHold_DefaultReleaseLetsReconcileSync`. Reconcile/`SyncAllGames` copies bytes after a default release. |
 | Staged release | Supported and tested. Hold cleared, AutoSync left off, reconcile/restart/file write do not copy. Explicit `POST /sync` does. A still-held third peer refuses. Both writer orders. |
 | Peer-targeted `SyncGame(game, peer)` | Unsupported. Explicit sync still contacts every online peer. Unheld peers participate. Held peers refuse. Do not add this in this PR. |
-| Same canonical id on the intermediate peer without an offer | Supported as a local API (`id` only while held). Not automatic. separate downstream client must call it. |
+| Same canonical id on the intermediate peer without an offer | Supported as a local API (`id` only while held). Not automatic; a separate client must initiate this action. |
 | Convert an already tracked game into a hold | Unsupported. Fails, leaves AutoSync and bytes alone. |
 | Mixed stock client to patched held server | Supported for the cases run. Manifest 409, delete 409, stock sync status `error`, files unchanged. |
 | Stock daemon on a patched database | **Unsafe.** Stock has no hold field and serves the held manifest (HTTP 200, file hash included). |
@@ -260,7 +260,7 @@ linux/arm64 5ff686835a8608e481e6d8af0447f5547dd9890fca693c462d9fe01a52aad64a
 
 ## 6. Combined checkout
 
-`[local path omitted]` at `d7ef7c6`, not pushed.
+An unpublished disposable worktree was used for combined validation; its path and local revision are omitted.
 
 ```text
 go test -count=1 -timeout 15m -run 'TestProvisioningHold_|TestAgreedBase|TestBaseFirst' ./e2e/ ./internal/p2p/syncengine/
@@ -271,11 +271,11 @@ RC=0
 
 Log: `[local path omitted]`
 
-- `Offline round-trip case:` PASS, files=4
-- `Dual-writer case:` PASS both orders, status=conflict, unique files kept
-- `Intermediate-peer rollback case:` PASS
+- Offline round-trip scenario: PASS; four synthetic files
+- Dual-writer conflict scenario: PASS in both orders; distinct synthetic files were retained
+- Intermediate-peer rollback scenario: PASS
 
-Three-node files were copied into the throwaway `e2e/` only. separate downstream client was not edited.
+Three-device fixtures were created only in a disposable local test tree; unrelated projects were not changed.
 
 ## 7. Draft PR text
 
@@ -350,11 +350,11 @@ and a named root.
 5. Staged release is local AutoSync off, not a peer lock. `TestProvisioningHold_StagedReleaseAllowsPeerInitiatedSync` is the contract.
 6. Do not treat #29/#30 as done.
 
-separate downstream client integration, contract only, no code in this tranche:
+Downstream integration guidance only; no integration implementation is part of this review:
 
-1. Keep the downstream integration's fail-closed guard fail-closed until this is merged and separate downstream client calls it.
+1. Maintain the downstream integration's fail-closed behaviour until the prerequisite is accepted and the client deliberately opts in.
 2. Source: `POST /api/games` with an explicit slug, `provisioningHold: true`.
-3. intermediate peer: the same id and a intermediate-peer local path. There will be no offer.
+3. The intermediate peer uses the same game ID with its own local save path. No offer is required.
 4. Configure roots while held.
 5. Release both with `{"autoSync": false}`. Leave the other endpoint held.
 6. `POST /api/games/{id}/sync` on the source. Compare hashes. The third peer must still be held, because this sync contacts every online peer.
