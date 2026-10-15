@@ -314,7 +314,7 @@ func TestDangerousSyncRoot(t *testing.T) {
 		`C:\Windows`, `C:\Windows\System32`,
 		`C:\Program Files`, `C:\ProgramData`,
 		`C:/Users/exampleuser`, // forward slashes must not bypass the guard
-		"/", "/home", "/home/omar", "/home/omar/.config", "/home/omar/.local/share",
+		"/", "/home", "/home/exampleuser", "/home/exampleuser/.config", "/home/exampleuser/.local/share",
 	}
 	for _, p := range dangerous {
 		if reason := DangerousSyncRoot(p); reason == "" {
@@ -330,8 +330,8 @@ func TestDangerousSyncRoot(t *testing.T) {
 		`C:\Users\exampleuser\Saved Games\CD Projekt Red\Cyberpunk 2077`,
 		`C:\Program Files\OldGame\saves`,
 		`D:\Games\Saves`,
-		"/home/omar/.local/share/Terraria",
-		"/home/omar/games/save",
+		"/home/exampleuser/.local/share/Terraria",
+		"/home/exampleuser/games/save",
 	}
 	for _, p := range safe {
 		if reason := DangerousSyncRoot(p); reason != "" {
