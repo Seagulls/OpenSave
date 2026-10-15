@@ -31,7 +31,7 @@ func TestWireDemo(t *testing.T) {
 	}
 	relayURL := startRelay(t)
 	const room = "demo-room"
-	const secret = "THE_PLAYER_NAME_IS_SIVA"
+	const secret = "SYNTHETIC_PLAYER_MARKER"
 
 	spy := joinAsEavesdropper(t, relayURL, room)
 
