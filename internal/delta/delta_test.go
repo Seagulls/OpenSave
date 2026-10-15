@@ -306,14 +306,14 @@ func TestBuildManifest_ExcludesAndCleansTmpFiles(t *testing.T) {
 func TestDangerousSyncRoot(t *testing.T) {
 	dangerous := []string{
 		`C:\`, `c:`, `D:\`,
-		`C:\Users`, `C:\Users\omarv`, `C:\Users\Siva Prakash`,
-		`C:\Users\omarv\AppData`, `C:\Users\omarv\AppData\Local`,
-		`C:\Users\omarv\AppData\Roaming`, `C:\Users\bob\AppData\LocalLow`,
-		`C:\Users\omarv\Documents`, `C:\Users\omarv\Desktop`, `C:\Users\omarv\Downloads`,
-		`C:\Users\omarv\Saved Games`,
+		`C:\Users`, `C:\Users\exampleuser`, `C:\Users\Example User`,
+		`C:\Users\exampleuser\AppData`, `C:\Users\exampleuser\AppData\Local`,
+		`C:\Users\exampleuser\AppData\Roaming`, `C:\Users\bob\AppData\LocalLow`,
+		`C:\Users\exampleuser\Documents`, `C:\Users\exampleuser\Desktop`, `C:\Users\exampleuser\Downloads`,
+		`C:\Users\exampleuser\Saved Games`,
 		`C:\Windows`, `C:\Windows\System32`,
 		`C:\Program Files`, `C:\ProgramData`,
-		`C:/Users/omarv`, // forward slashes must not bypass the guard
+		`C:/Users/exampleuser`, // forward slashes must not bypass the guard
 		"/", "/home", "/home/omar", "/home/omar/.config", "/home/omar/.local/share",
 	}
 	for _, p := range dangerous {
@@ -323,11 +323,11 @@ func TestDangerousSyncRoot(t *testing.T) {
 	}
 
 	safe := []string{
-		`C:\Users\omarv\Desktop\Synced Folder`,
-		`C:\Users\omarv\Documents\Steam\CODEX\1091500`,
-		`C:\Users\omarv\AppData\Roaming\Goldberg SteamEmu Saves\ANIMAL WELL`,
+		`C:\Users\exampleuser\Desktop\Synced Folder`,
+		`C:\Users\exampleuser\Documents\Steam\CODEX\1091500`,
+		`C:\Users\exampleuser\AppData\Roaming\Goldberg SteamEmu Saves\ANIMAL WELL`,
 		`C:\Users\Public\Documents\Steam\CODEX\264710`,
-		`C:\Users\omarv\Saved Games\CD Projekt Red\Cyberpunk 2077`,
+		`C:\Users\exampleuser\Saved Games\CD Projekt Red\Cyberpunk 2077`,
 		`C:\Program Files\OldGame\saves`,
 		`D:\Games\Saves`,
 		"/home/omar/.local/share/Terraria",
