@@ -19,8 +19,10 @@ import (
 //   - Identical manifests are never a conflict.
 //   - Never synced before (lastSyncTimeMs == 0): conflict only if BOTH
 //     sides already have files (two pre-existing, diverged save states).
-//   - Otherwise: conflict when both manifests' latest mtimes are newer
-//     than lastSyncTimeMs.
+//   - With an earlier sync but no agreed content base: conflict when both
+//     mtimes are newer, or when neither is newer but both hold distinct non-empty content (an ambiguous timestamp ordering
+//     that must not silently pick a winner).
+//     Only a clearly one-sided newer mtime falls through without conflict.
 func DetectConflict(local, remote delta.Manifest, lastSyncTimeMs int64, agreedHash string) bool {
 	if local.ManifestHash() == remote.ManifestHash() {
 		return false
@@ -59,6 +61,15 @@ func DetectConflict(local, remote delta.Manifest, lastSyncTimeMs int64, agreedHa
 	// device a conflict (TestUntrackPropagatesAndRecovers).
 	localModified := int64(local.LatestMtime) > lastSyncTimeMs
 	remoteModified := int64(remote.LatestMtime) > lastSyncTimeMs
+	if !localModified && !remoteModified && len(local.Files) > 0 && len(remote.Files) > 0 {
+		// Different non-empty content with no agreed base, yet neither mtime
+		// clears the last-sync stamp, is ambiguous rather than proof of
+		// convergence. Filesystem timestamp granularity can put both edits
+		// a millisecond BEFORE the recorded stamp even when they happened
+		// immediately after it. Choosing by mtime here silently discards one
+		// version. Hold both for a decision instead.
+		return true
+	}
 	return localModified && remoteModified
 }
 
