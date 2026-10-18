@@ -15,14 +15,14 @@ import (
 // DetectConflict reports whether both sides changed since the last sync —
 // the only situation that needs user intervention.
 //
-// Rules (ported exactly):
+// Rules:
 //   - Identical manifests are never a conflict.
 //   - Never synced before (lastSyncTimeMs == 0): conflict only if BOTH
 //     sides already have files (two pre-existing, diverged save states).
 //   - With an earlier sync but no agreed content base: conflict when both
-//     mtimes are newer, or when neither is newer but both hold distinct non-empty content (an ambiguous timestamp ordering
-//     that must not silently pick a winner).
-//     Only a clearly one-sided newer mtime falls through without conflict.
+//     mtimes are newer, or when neither is newer but both hold differing
+//     non-empty saves. The latter cannot safely choose a winner by mtime.
+//     Only a clearly one-sided newer mtime proceeds without a conflict.
 func DetectConflict(local, remote delta.Manifest, lastSyncTimeMs int64, agreedHash string) bool {
 	if local.ManifestHash() == remote.ManifestHash() {
 		return false
