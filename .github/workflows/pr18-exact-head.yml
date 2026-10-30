@@ -1,9 +1,7 @@
 name: PR18 public exact-head validation (no E2E)
 run-name: PR18 exact HEAD and #131 base, reproducible synthetic tests
 on:
-  push:
-    branches: [ci/verify-pr18-exact-head-20261030]
-    paths: ['.github/workflows/pr18-exact-head.yml']
+  workflow_dispatch:
 permissions:
   contents: read
   statuses: write
