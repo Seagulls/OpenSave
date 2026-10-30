@@ -1,0 +1,169 @@
+name: PR18 public exact-head validation (no E2E)
+run-name: PR18 exact HEAD and #131 base, reproducible synthetic tests
+on:
+  push:
+    branches: [ci/verify-pr18-exact-head-20261030]
+    paths: ['.github/workflows/pr18-exact-head.yml']
+permissions:
+  contents: read
+  statuses: write
+concurrency:
+  group: pr18-exact-head-20261030
+  cancel-in-progress: false
+
+jobs:
+  original-regression:
+    name: Original public regression / ${{ matrix.variant }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 18
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: base-131-expected-red
+            source_sha: e8014cfcd8585d635573219fa4cae63d4f9dde5f
+            expectation: red
+          - variant: pr18-head-expected-green
+            source_sha: e7151cac0c812b7b5a7ec7749e369cf96ab4624f
+            expectation: green
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.source_sha }}
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: 7a430835448cbbacdb84d5619f06df68e8f8c443
+          path: .review-witness
+          persist-credentials: false
+          sparse-checkout: internal/api/native_import_ownership_regression_test.go
+          sparse-checkout-cone-mode: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.3'
+      - name: Assert exact source and inject public independent test only
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${{ matrix.source_sha }}"
+          mkdir -p cmd/opensave-app/frontend/dist
+          printf 'stub\n' > cmd/opensave-app/frontend/dist/.stub
+          cp .review-witness/internal/api/native_import_ownership_regression_test.go internal/api/
+          echo "Variant: ${{ matrix.variant }}, source: ${{ matrix.source_sha }}" >> "$GITHUB_STEP_SUMMARY"
+          go version
+      - name: Exact-stock RED vs published PR18 GREEN
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +e
+          go test -race -count=1 -p 2 -timeout=12m -v ./internal/api -run '^TestRegressionUntrackedImportCannotOverwriteOwnedRoot$' > "$RUNNER_TEMP/pr18-original-witness.log" 2>&1
+          rc=$?
+          set -e
+          cat "$RUNNER_TEMP/pr18-original-witness.log"
+          if [[ "${{ matrix.expectation }}" == red ]]; then
+            test "$rc" -ne 0 || { echo "::error::Base unexpectedly passed original regression"; exit 1; }
+            grep -q 'import wrote into another game' "$RUNNER_TEMP/pr18-original-witness.log" || { echo "::error::Base failure was not the specific reported defect"; exit 1; }
+            echo "EXPECTED STOCK RED: confirmed original owner bytes changed" >> "$GITHUB_STEP_SUMMARY"
+          else
+            test "$rc" -eq 0 || { echo "::error::Published HEAD did not pass public independent regression"; exit 1; }
+            echo "PUBLISHED PR18 GREEN: all three original owner-byte cases passed" >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Publish private-free commit status receipt
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RESULT: ${{ job.status }}
+          VARIANT: ${{ matrix.variant }}
+          EXACT_SHA: ${{ matrix.source_sha }}
+        run: |
+          set -euo pipefail
+          if [[ "$RESULT" == success ]]; then status=success; else status=failure; fi
+          export status
+          python3 - <<'PY' > "$RUNNER_TEMP/pr18-status.json"
+          import os,json
+          print(json.dumps({
+            "state":os.environ["status"],
+            "context":"pr18-exact/"+os.environ["VARIANT"],
+            "description":os.environ["EXACT_SHA"][:12]+"; "+os.environ["RESULT"],
+            "target_url":"https://github.com/"+os.environ["GITHUB_REPOSITORY"]+"/actions/runs/"+os.environ["GITHUB_RUN_ID"]
+          }))
+          PY
+          curl --fail-with-body --silent --show-error -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "Content-Type: application/json" \
+            --data-binary @"$RUNNER_TEMP/pr18-status.json" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA"
+
+  full-native:
+    name: PR18 exact-head native Go and builds
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: e7151cac0c812b7b5a7ec7749e369cf96ab4624f
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.3'
+      - name: Assert published commit and prepare embed stub
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "e7151cac0c812b7b5a7ec7749e369cf96ab4624f"
+          mkdir -p cmd/opensave-app/frontend/dist
+          printf 'stub\n' > cmd/opensave-app/frontend/dist/.stub
+          go version
+          echo "Source: e7151cac0c812b7b5a7ec7749e369cf96ab4624f; base: e8014cfcd8585d635573219fa4cae63d4f9dde5f" >> "$GITHUB_STEP_SUMMARY"
+      - name: Formatting of changed Go files
+        shell: bash
+        run: |
+          set -euo pipefail
+          files="internal/api/backup_import_ownership_test.go internal/api/routes_backup.go internal/daemon/daemon.go internal/store/aliases.go internal/store/game_roots.go internal/store/games.go internal/store/import_admission.go internal/store/import_admission_test.go internal/store/import_claim_identity_unix.go internal/store/import_claim_identity_windows.go"
+          unformatted="$(gofmt -l $files)"
+          test -z "$unformatted" || { echo "::error::Unformatted files"; echo "$unformatted"; exit 1; }
+      - name: Go vet all packages
+        run: go vet ./...
+      - name: Native Linux CLI binary
+        run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o "$RUNNER_TEMP/opensave-linux-amd64" ./cmd/opensave-cli
+      - name: Windows amd64 CLI cross-build
+        run: CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -o "$RUNNER_TEMP/opensave-windows-amd64.exe" ./cmd/opensave-cli
+      - name: Focused ownership, API rollback, import lock and alias adversarial tests x3
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test -race -count=3 -p 2 -timeout=16m -v ./internal/api ./internal/store \
+            -run '^(TestBackupImportCannotOverwriteAnotherGamesOwnedPath|TestBackupImportRefusesOverwriteWhenSafetyDirectoryUnavailable|TestRestoreEmptyImportTarget|TestImportPathAdmissionSerializesIndependentRegistrations|TestImportPathAdmissionRefusesNamedRootAndNestedPath|TestImportAdmissionRefusesConcurrentRootRelocationAndWrongToken|TestImportPathClaimCrossProcessCWDAndHardlink|TestImportPathClaimSameLockAcrossHome)$'
+      - name: Full native non-E2E Go race suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          packages="$(go list ./... | grep -v '/e2e$')"
+          go test -race -count=1 -p 2 -timeout=20m $packages
+      - name: Publish verifiable public exact-head receipt
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RESULT: ${{ job.status }}
+        run: |
+          set -euo pipefail
+          if [[ "$RESULT" == success ]]; then status=success; else status=failure; fi
+          export status
+          python3 - <<'PY' > "$RUNNER_TEMP/pr18-status.json"
+          import os,json
+          print(json.dumps({
+            "state":os.environ["status"],
+            "context":"pr18-exact/full-native-build-race",
+            "description":"e7151cac0c81; "+os.environ["RESULT"],
+            "target_url":"https://github.com/"+os.environ["GITHUB_REPOSITORY"]+"/actions/runs/"+os.environ["GITHUB_RUN_ID"]
+          }))
+          PY
+          curl --fail-with-body --silent --show-error -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "Content-Type: application/json" \
+            --data-binary @"$RUNNER_TEMP/pr18-status.json" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA"
