@@ -93,30 +93,7 @@ type Game struct {
 // CreateGame inserts a new game and its default "main" branch in one
 // transaction.
 func (s *Store) CreateGame(g Game) error {
-	if g.ActiveBranch == "" {
-		g.ActiveBranch = "main"
-	}
-	if g.MaxSnapshots == 0 {
-		g.MaxSnapshots = 20
-	}
-
-	tx, err := s.db.Beginx()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-
-	_, err = tx.NamedExec(`
-		INSERT INTO games (id, name, save_path, active_branch, auto_sync, max_snapshots, max_manual_snapshots, app_id, exe_path, cover_url)
-		VALUES (:id, :name, :save_path, :active_branch, :auto_sync, :max_snapshots, :max_manual_snapshots, :app_id, :exe_path, :cover_url)`,
-		g)
-	if err != nil {
-		return fmt.Errorf("insert game: %w", err)
-	}
-	if _, err := tx.Exec(`INSERT INTO branches (game_id, name) VALUES (?, ?)`, g.ID, g.ActiveBranch); err != nil {
-		return fmt.Errorf("insert default branch: %w", err)
-	}
-	return tx.Commit()
+	return s.createGame(g, false)
 }
 
 // GetGame returns a single game by ID.

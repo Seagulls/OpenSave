@@ -116,13 +116,22 @@ func (s *Store) CreateHeldGame(g Game) error {
 	if g.ID == "" {
 		return fmt.Errorf("held game requires an id")
 	}
+	return s.createGame(g, true)
+}
+
+// createGame is the single transaction boundary for ordinary and held
+// registration. A held create commits game, branch, hold and tombstone
+// clearing together; an ordinary create retains its existing semantics.
+func (s *Store) createGame(g Game, held bool) error {
 	if g.ActiveBranch == "" {
 		g.ActiveBranch = "main"
 	}
 	if g.MaxSnapshots == 0 {
 		g.MaxSnapshots = 20
 	}
-	g.AutoSync = false
+	if held {
+		g.AutoSync = false
+	}
 
 	tx, err := s.db.Beginx()
 	if err != nil {
@@ -132,21 +141,22 @@ func (s *Store) CreateHeldGame(g Game) error {
 
 	if _, err := tx.NamedExec(`
 		INSERT INTO games (id, name, save_path, active_branch, auto_sync, max_snapshots, max_manual_snapshots, app_id, exe_path, cover_url)
-		VALUES (:id, :name, :save_path, :active_branch, :auto_sync, :max_snapshots, :max_manual_snapshots, :app_id, :exe_path, :cover_url)`,
-		g); err != nil {
+		VALUES (:id, :name, :save_path, :active_branch, :auto_sync, :max_snapshots, :max_manual_snapshots, :app_id, :exe_path, :cover_url)`, g); err != nil {
 		return fmt.Errorf("insert game: %w", err)
 	}
 	if _, err := tx.Exec(`INSERT INTO branches (game_id, name) VALUES (?, ?)`, g.ID, g.ActiveBranch); err != nil {
 		return fmt.Errorf("insert default branch: %w", err)
 	}
-	if _, err := tx.Exec(
-		`INSERT INTO game_provisioning_holds (game_id, held_at) VALUES (?, ?)`,
-		g.ID, time.Now().UTC().Format(time.RFC3339Nano),
-	); err != nil {
-		return fmt.Errorf("insert provisioning hold: %w", err)
-	}
-	if _, err := tx.Exec(`DELETE FROM untracked_games WHERE game_id = ?`, g.ID); err != nil {
-		return fmt.Errorf("clear tombstone: %w", err)
+	if held {
+		if _, err := tx.Exec(
+			`INSERT INTO game_provisioning_holds (game_id, held_at) VALUES (?, ?)`,
+			g.ID, time.Now().UTC().Format(time.RFC3339Nano),
+		); err != nil {
+			return fmt.Errorf("insert provisioning hold: %w", err)
+		}
+		if _, err := tx.Exec(`DELETE FROM untracked_games WHERE game_id = ?`, g.ID); err != nil {
+			return fmt.Errorf("clear tombstone: %w", err)
+		}
 	}
 	return tx.Commit()
 }
