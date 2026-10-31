@@ -114,9 +114,15 @@ New Game:
 	if err := os.Chtimes(yamlPath, downloaded, downloaded); err != nil {
 		t.Fatal(err)
 	}
+	// Force the rebuild to remain in progress for this assertion. On a fast
+	// runner it can otherwise finish before the nonblocking read returns,
+	// which is valid production behaviour and makes this test intermittent.
+	release, builds := slowBuilds(t, sc)
 	if got := sc.loadManifestIndexNoWait(); len(got) != 0 {
 		t.Fatalf("got %+v, want nothing until the index is built", got)
 	}
+	waitUntil(t, "the background rebuild to start", func() bool { return builds.Load() > 0 })
+	release()
 	deadline := time.Now().Add(30 * time.Second)
 	for {
 		if _, err := os.Stat(indexPath); err == nil {
