@@ -482,8 +482,18 @@ func (s *Server) handleUpdateGame(w http.ResponseWriter, r *http.Request) {
 		game.LastManifestHash = s.Daemon.LastSnapshotHashUnder(game, oldIgnore)
 	}
 
-	if err := s.Daemon.Store.UpdateGame(game); err != nil {
-		writeError(w, notFoundToStatus(err), err.Error())
+	var updateErr error
+	if game.SavePath != oldSavePath {
+		updateErr = s.Daemon.Store.UpdateGamePathIf(game, oldSavePath)
+	} else {
+		updateErr = s.Daemon.Store.UpdateGame(game)
+	}
+	if updateErr != nil {
+		if errors.Is(updateErr, store.ErrGamePathChanged) {
+			writeError(w, http.StatusConflict, updateErr.Error())
+		} else {
+			writeError(w, notFoundToStatus(updateErr), updateErr.Error())
+		}
 		return
 	}
 	if game.Name != oldName {
