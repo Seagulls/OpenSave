@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -1232,78 +1233,32 @@ func (d *Daemon) UntrackGame(gameID string) error {
 // matching — for titles tracked under different names on two PCs. If aliasID
 // is itself a tracked game here, that entry is removed so the alias actually
 // takes effect (a direct id lookup would otherwise win); its save data on
-// disk is left untouched, exactly like a normal untrack.
-func (d *Daemon) LinkGames(canonicalID, aliasID string) error {
-	if canonicalID == "" || aliasID == "" || canonicalID == aliasID {
-		return fmt.Errorf("invalid link %q -> %q", aliasID, canonicalID)
+// disk is left untouched, exactly like a normal ufunc (d *Daemon) LinkGames(canonicalID, aliasID string) error {
+	if canonicalID == "" || aliasID == "" || canonicalID == aliasID { return fmt.Errorf("invalid game link") }
+	if d.P2P == nil || d.P2P.Sync == nil { return fmt.Errorf("native root admission unavailable") }
+	// Acquire admission for BOTH affected games in a stable order.
+	ids := []string{canonicalID, aliasID}
+	sort.Strings(ids)
+	releases := make([]func(), 0, 2)
+	defer func() { for i := len(releases)-1; i >= 0; i-- { releases[i]() } }()
+	for _, id := range ids {
+		release, ok := d.P2P.Sync.TryTopologyMutation(id)
+		if !ok { return fmt.Errorf("cannot link games while native sync is active for %s", id) }
+		releases = append(releases, release)
 	}
-	if _, err := d.Store.GetGame(canonicalID); err != nil {
-		return fmt.Errorf("canonical game %q: %w", canonicalID, err)
+	branches, merged, err := d.Store.LinkGamesAtomic(canonicalID, aliasID, snapshot.CleanBranchName(aliasID))
+	if err != nil { return err }
+	if len(branches) > 0 {
+		d.Log.Log("info", fmt.Sprintf("linked %q into %q: snapshot branches %s", aliasID, canonicalID, strings.Join(branches, ", ")))
 	}
-	if err := d.Store.AddGameAlias(aliasID, canonicalID); err != nil {
-		return err
-	}
-	// If the alias id is itself a tracked game, snapshot its identity (so
-	// unlink can restore it) and remove that entry so the alias takes effect.
-	if merged, err := d.Store.GetGame(aliasID); err == nil {
-		_ = d.Store.SetAliasSnapshot(aliasID, merged.Name, merged.SavePath, merged.AppID)
-
-		// Carry the merged entry's extra save locations over to the canonical
-		// game. Linking says these are the same game, so its folders are that
-		// game's folders — and deleting the entry below cascades them away,
-		// which would silently stop covering folders the user had set up
-		// without saying anything. The files stay either way; what would be
-		// lost is OpenSave knowing about them.
-		//
-		// A name the canonical game already uses is left alone: it has its own
-		// folder for that name here, and the merged entry's path is no more
-		// authoritative than the one already chosen.
-		if mergedRoots, rootsErr := d.Store.ListGameRoots(aliasID); rootsErr == nil {
-			existing, _ := d.Store.GameRootPaths(canonicalID)
-			for _, root := range mergedRoots {
-				if _, taken := existing[root.Name]; taken {
-					continue
-				}
-				var addErr error
-				if root.Mapped() {
-					addErr = d.withRootTopology(canonicalID, func() error {
-						return d.Store.AddGameRoot(canonicalID, root.Name, root.Path)
-					})
-				} else {
-					addErr = d.Store.NoteGameRoot(canonicalID, root.Name)
-				}
-				if addErr != nil {
-					d.Log.Log("warn", fmt.Sprintf(
-						"linking %q: could not carry over its %q save location: %v", aliasID, root.Name, addErr))
-				}
-			}
-		}
-
-		// Its history comes too, onto branches named after it: deleting the
-		// entry below would otherwise take every snapshot row with it and
-		// leave the archives on disk where nothing lists, restores or prunes
-		// them. So would its place in Favourites and collections.
-		branches, err := d.Store.AdoptHistory(aliasID, canonicalID, snapshot.CleanBranchName(aliasID))
-		if err != nil {
-			return fmt.Errorf("keep %q's snapshots: %w", aliasID, err)
-		}
-		if len(branches) > 0 {
-			d.Log.Log("info", fmt.Sprintf("linked %q into %q: its snapshots are kept on the branch %s",
-				merged.Name, canonicalID, strings.Join(branches, ", ")))
-		}
-		if err := d.Store.AdoptCollections(aliasID, canonicalID); err != nil {
-			d.Log.Log("warn", err.Error())
-		}
-
+	if merged {
 		d.Watcher.Unwatch(aliasID)
-		if err := d.Store.DeleteGame(aliasID); err != nil {
-			return err
-		}
-		// The canonical game may have gained locations just now; its watch was
-		// set up before they existed.
 		d.RewatchGame(canonicalID)
 	}
 	return nil
+}
+
+ nil
 }
 
 // UnlinkGame removes an alias link and, if that alias was a game merged in via
