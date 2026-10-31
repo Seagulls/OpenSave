@@ -34,6 +34,7 @@ func cmdGame(d *daemon.Daemon, args []string) int {
 	if err != nil {
 		return fail(asJSON, unknownGameError(d, gameID, err))
 	}
+	originalPath := game.SavePath
 
 	switch key {
 	case "name":
@@ -78,7 +79,14 @@ func cmdGame(d *daemon.Daemon, args []string) int {
 		return fail(asJSON, fmt.Errorf("unknown setting %q\n\n%s", key, gameUsage))
 	}
 
-	if err := d.Store.UpdateGame(game); err != nil {
+	if key == "path" {
+		// This caller supplies the path it read, so concurrent relocation is
+		// rejected rather than unintentionally overwritten.
+		err = d.Store.UpdateGamePathIf(game, originalPath)
+	} else {
+		err = d.Store.UpdateGame(game)
+	}
+	if err != nil {
 		return fail(asJSON, err)
 	}
 	// Re-watch so a path or auto-sync change takes effect immediately rather

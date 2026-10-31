@@ -147,10 +147,27 @@ func (s *Store) ListGames() ([]Game, error) {
 	return games, nil
 }
 
-// UpdateGame overwrites the mutable fields of a game (settings/patch-style
-// update — id, save_path are updatable too since the UI allows relocating
-// a tracked save folder).
+// ErrGamePathChanged means the path at SQL commit differs from the path
+// observed by a caller. A stale metadata edit must not restore an old path.
+var ErrGamePathChanged = errors.New("game save path changed; refresh and retry")
+
+// UpdateGame changes metadata only while its observed path is still current.
+// Intentional relocation must use UpdateGamePathIf after native admission.
 func (s *Store) UpdateGame(g Game) error {
+	return s.updateGameAtPath(g, g.SavePath)
+}
+
+// UpdateGamePathIf changes a path only while its expected old value remains
+// current. The caller is responsible for native writer/topology admission.
+func (s *Store) UpdateGamePathIf(g Game, expectedOldPath string) error {
+	return s.updateGameAtPath(g, expectedOldPath)
+}
+
+func (s *Store) updateGameAtPath(g Game, expectedOldPath string) error {
+	arg := struct {
+		Game
+		ExpectedSavePath string `db:"expected_save_path"`
+	}{Game: g, ExpectedSavePath: expectedOldPath}
 	res, err := s.db.NamedExec(`
 		UPDATE games SET
 			name = :name,
@@ -165,11 +182,15 @@ func (s *Store) UpdateGame(g Game) error {
 			last_manifest_hash = :last_manifest_hash,
 			sync_ignore = :sync_ignore,
 			sync_device_settings = :sync_device_settings
-		WHERE id = :id`, g)
+		WHERE id = :id AND save_path = :expected_save_path`, arg)
 	if err != nil {
 		return fmt.Errorf("update game %s: %w", g.ID, err)
 	}
-	return checkRowAffected(res)
+	n, err := res.RowsAffected()
+	if err != nil { return err }
+	if n == 1 { return nil }
+	if _, err := s.GetGame(g.ID); err != nil { return err }
+	return ErrGamePathChanged
 }
 
 // SetLastManifestHash records the manifest hash captured at auto-snapshot

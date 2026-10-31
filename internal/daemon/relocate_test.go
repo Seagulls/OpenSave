@@ -162,8 +162,9 @@ func TestRelocateToOtherDrive_AnOfferIsStaleOnceTheFolderIsSetByHand(t *testing.
 
 	byHand := t.TempDir()
 	g, _ := d.Store.GetGame("g")
+	previousPath := g.SavePath
 	g.SavePath = byHand
-	if err := d.Store.UpdateGame(g); err != nil {
+	if err := d.Store.UpdateGamePathIf(g, previousPath); err != nil {
 		t.Fatal(err)
 	}
 
