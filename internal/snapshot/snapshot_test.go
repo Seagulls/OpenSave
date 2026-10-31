@@ -273,8 +273,9 @@ func TestSingleFileSaveMode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	previousPath := game.SavePath
 	game.SavePath = saveFile
-	if err := env.store.UpdateGame(game); err != nil {
+	if err := env.store.UpdateGamePathIf(game, previousPath); err != nil {
 		t.Fatal(err)
 	}
 
