@@ -171,24 +171,23 @@ func (s *Store) SetSyncStateForRoot(gameID, peerID, root string, files, dirs []s
 // records which paths the two devices share, and losing it would make every
 // deletion look like a new file.
 func (s *Store) RebaseAgreedHashesForGame(gameID, newHash string) error {
-	// Only rows that already held an agreement are rewritten. A peer this
-	// game has never converged with must keep no base at all — inventing one
-	// would claim an agreement that never happened.
-	_, err := s.db.Exec(
-		`UPDATE game_peer_sync_state SET agreed_hash = ?, pushed_hash = ''
-		 WHERE game_id = ? AND agreed_hash != ''`, newHash, gameID)
+	tx, err := s.db.Beginx()
 	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	// Preserve old agreement semantics without partially committing.
+	if _, err := tx.Exec(
+		`UPDATE game_peer_sync_state SET agreed_hash = ?, pushed_hash = ''
+		 WHERE game_id = ? AND agreed_hash != ''`, newHash, gameID); err != nil {
 		return fmt.Errorf("rebase agreed hashes for %s: %w", gameID, err)
 	}
-	// Extra locations are not affected by the primary rebase; their own bases
-	// are cleared, since a rule can exclude files inside them too and there is
-	// no single hash that fits every location.
-	if _, err := s.db.Exec(
-		`UPDATE game_root_sync_state SET agreed_hash = '', pushed_hash = '' WHERE game_id = ?`,
-		gameID); err != nil {
+	// Named roots are independently reconciled after exclusion changes.
+	if _, err := tx.Exec(
+		`UPDATE game_root_sync_state SET agreed_hash = '', pushed_hash = '' WHERE game_id = ?`, gameID); err != nil {
 		return fmt.Errorf("clear root agreed hashes for %s: %w", gameID, err)
 	}
-	return nil
+	return tx.Commit()
 }
 
 func (s *Store) ClearAgreedHashesForGame(gameID string) error {
