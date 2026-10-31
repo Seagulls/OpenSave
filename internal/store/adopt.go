@@ -3,6 +3,8 @@ package store
 import (
 	"fmt"
 	"time"
+
+	"github.com/jmoiron/sqlx"
 )
 
 // AdoptHistory moves every snapshot of one game to another, onto branches of
@@ -21,7 +23,13 @@ func (s *Store) AdoptHistory(fromID, toID, base string) ([]string, error) {
 		return nil, err
 	}
 	defer tx.Rollback()
+	names, err := s.adoptHistoryTx(tx, fromID, toID, base)
+	if err != nil { return nil, err }
+	if err := tx.Commit(); err != nil { return nil, err }
+	return names, nil
+}
 
+func (s *Store) adoptHistoryTx(tx *sqlx.Tx, fromID, toID, base string) ([]string, error) {
 	var from []string
 	if err := tx.Select(&from, `SELECT name FROM branches WHERE game_id = ? ORDER BY name`, fromID); err != nil {
 		return nil, fmt.Errorf("list %s's branches: %w", fromID, err)
@@ -63,9 +71,6 @@ func (s *Store) AdoptHistory(fromID, toID, base string) ([]string, error) {
 			return nil, fmt.Errorf("move %s/%s's snapshots: %w", fromID, branch, err)
 		}
 		names = append(names, name)
-	}
-	if err := tx.Commit(); err != nil {
-		return nil, err
 	}
 	return names, nil
 }
