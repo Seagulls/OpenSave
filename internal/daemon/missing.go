@@ -191,7 +191,7 @@ func (d *Daemon) AcceptRelocation(gameID, path string) error {
 	}
 	old := game.SavePath
 	game.SavePath = newPath
-	if err := d.Store.UpdateGame(game); err != nil {
+	if err := d.Store.UpdateGamePathIf(game, old); err != nil {
 		return fmt.Errorf("could not switch %q to %s: %w", game.Name, newPath, err)
 	}
 	d.missingMu.Lock()
