@@ -605,8 +605,12 @@ func (s *Server) handleLinkGame(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "alias is required")
 		return
 	}
-	if err := s.Daemon.LinkGames(gameID, body.Alias); err != nil {
-		writeError(w, notFoundToStatus(err), err.Error())
+	if err := s.Daemon.LinkGamesContext(r.Context(), gameID, body.Alias); err != nil {
+		if errors.Is(err, daemon.ErrLinkGamesBusy) {
+			writeError(w, http.StatusConflict, "A sync of this game is in progress. Try again in a moment.")
+		} else {
+			writeError(w, notFoundToStatus(err), err.Error())
+		}
 		return
 	}
 	s.BroadcastGamesUpdate()
