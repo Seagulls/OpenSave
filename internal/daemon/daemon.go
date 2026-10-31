@@ -1234,7 +1234,17 @@ func (d *Daemon) UntrackGame(gameID string) error {
 // is itself a tracked game here, that entry is removed so the alias actually
 // takes effect (a direct id lookup would otherwise win); its save data on
 // disk is left untouched, exactly like a normal untrack.
+// ErrLinkGamesBusy means sync activity did not drain within the bounded
+// admission window. No link/alias/root changes were committed.
+var ErrLinkGamesBusy = errors.New("a sync of this game is in progress")
+
 func (d *Daemon) LinkGames(canonicalID, aliasID string) error {
+	return d.LinkGamesContext(context.Background(), canonicalID, aliasID)
+}
+
+// LinkGamesContext reserves canonical and alias in stable order, then commits
+// the entire link atomically. One bounded deadline covers both admissions.
+func (d *Daemon) LinkGamesContext(parent context.Context, canonicalID, aliasID string) error {
 	if canonicalID == "" || aliasID == "" || canonicalID == aliasID {
 		return fmt.Errorf("invalid game link")
 	}
@@ -1250,10 +1260,15 @@ func (d *Daemon) LinkGames(canonicalID, aliasID string) error {
 			releases[i]()
 		}
 	}()
+	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
+	defer cancel()
 	for _, id := range ids {
-		release, ok := d.P2P.Sync.TryTopologyMutation(id)
-		if !ok {
-			return fmt.Errorf("cannot link games while native sync is active for %s", id)
+		release, err := d.P2P.Sync.WaitTopologyMutation(ctx, id, 100*time.Millisecond)
+		if err != nil {
+			if errors.Is(err, context.DeadlineExceeded) && parent.Err() == nil {
+				return fmt.Errorf("%w for %s", ErrLinkGamesBusy, id)
+			}
+			return fmt.Errorf("game link admission for %s: %w", id, err)
 		}
 		releases = append(releases, release)
 	}
