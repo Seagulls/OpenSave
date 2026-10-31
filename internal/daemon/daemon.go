@@ -1233,21 +1233,34 @@ func (d *Daemon) UntrackGame(gameID string) error {
 // matching — for titles tracked under different names on two PCs. If aliasID
 // is itself a tracked game here, that entry is removed so the alias actually
 // takes effect (a direct id lookup would otherwise win); its save data on
-// disk is left untouched, exactly like a normal ufunc (d *Daemon) LinkGames(canonicalID, aliasID string) error {
-	if canonicalID == "" || aliasID == "" || canonicalID == aliasID { return fmt.Errorf("invalid game link") }
-	if d.P2P == nil || d.P2P.Sync == nil { return fmt.Errorf("native root admission unavailable") }
-	// Acquire admission for BOTH affected games in a stable order.
+// disk is left untouched, exactly like a normal untrack.
+func (d *Daemon) LinkGames(canonicalID, aliasID string) error {
+	if canonicalID == "" || aliasID == "" || canonicalID == aliasID {
+		return fmt.Errorf("invalid game link")
+	}
+	if d.P2P == nil || d.P2P.Sync == nil {
+		return fmt.Errorf("native root admission unavailable")
+	}
+	// Acquiring in deterministic order avoids deadlock with concurrent links.
 	ids := []string{canonicalID, aliasID}
 	sort.Strings(ids)
 	releases := make([]func(), 0, 2)
-	defer func() { for i := len(releases)-1; i >= 0; i-- { releases[i]() } }()
+	defer func() {
+		for i := len(releases) - 1; i >= 0; i-- {
+			releases[i]()
+		}
+	}()
 	for _, id := range ids {
 		release, ok := d.P2P.Sync.TryTopologyMutation(id)
-		if !ok { return fmt.Errorf("cannot link games while native sync is active for %s", id) }
+		if !ok {
+			return fmt.Errorf("cannot link games while native sync is active for %s", id)
+		}
 		releases = append(releases, release)
 	}
 	branches, merged, err := d.Store.LinkGamesAtomic(canonicalID, aliasID, snapshot.CleanBranchName(aliasID))
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	if len(branches) > 0 {
 		d.Log.Log("info", fmt.Sprintf("linked %q into %q: snapshot branches %s", aliasID, canonicalID, strings.Join(branches, ", ")))
 	}
@@ -1256,9 +1269,6 @@ func (d *Daemon) UntrackGame(gameID string) error {
 		d.RewatchGame(canonicalID)
 	}
 	return nil
-}
-
- nil
 }
 
 // UnlinkGame removes an alias link and, if that alias was a game merged in via
