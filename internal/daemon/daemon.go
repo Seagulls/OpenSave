@@ -101,6 +101,11 @@ type Daemon struct {
 	incomplete            incompleteAutoSnapshots
 	// scanMu runs one save scan at a time. See ScanForSaves.
 	scanMu sync.Mutex
+	// A scan for a peer's offered game: one at a time, at most once a
+	// minute (scanForOffer).
+	offerScanMu      sync.Mutex
+	offerScanRunning bool
+	lastOfferScan    time.Time
 
 	// uploads counts cloud mirrors still running, so Stop can wait for them
 	// rather than letting process exit truncate one.
@@ -186,6 +191,9 @@ func New(opts Options) (*Daemon, error) {
 
 	// A game's device settings are left out of syncing (devicesettings.go).
 	d.P2P.Sync.DeviceSettingsFor = d.deviceSettingsFor
+	// A game being played here is synced when its session ends
+	// (syncengine/playing.go).
+	d.P2P.Sync.Playing = func(gameID string) bool { return !d.PlayingSince(gameID).IsZero() }
 
 	// A restore or a branch switch rewrites a save folder; nothing syncing it
 	// may read it half-way (syncengine/settle.go).
@@ -200,15 +208,19 @@ func New(opts Options) (*Daemon, error) {
 	d.P2P.OnAutoTracked = d.adoptAutoTracked
 	// A Switch save a peer syncs goes into this device's own emulator profile.
 	d.P2P.SwitchSaveFolder = d.Scanner.SwitchSaveFolder
-	// What a game arriving from a peer may be tracked at without asking:
-	// a folder this device's own scanner noted as a save, one inside an
-	// emulator's save folder here, or a Switch title's slot in a NAND here.
-	// Anything else is offered to the user.
-	d.P2P.KnownSaveLocation = func(path string) bool {
+	// What a game arriving from a peer may be tracked at without asking: a
+	// folder this device's own scanner noted as a save, one inside an
+	// emulator's save folder here, a Switch title's slot in a NAND here, or
+	// where the save catalogue or Steam says that game keeps its saves here,
+	// before it exists. Anything else is offered to the user.
+	d.P2P.OnGameOffered = d.scanForOffer
+	d.P2P.KnownSaveLocation = func(name, appID, path string) bool {
 		if known, err := d.Store.IsKnownSave(path); err == nil && known {
 			return true
 		}
-		return d.Scanner.InsideEmulatorSaveRoot(path) || presets.IsSwitchSaveSlot(path)
+		return d.Scanner.InsideEmulatorSaveRoot(path) || presets.IsSwitchSaveSlot(path) ||
+			d.Scanner.CatalogueSaveLocation(name, appID, path) ||
+			d.Scanner.SteamSaveLocation(appID, path)
 	}
 
 	// Every new snapshot mirrors to the configured cloud provider in the
@@ -273,6 +285,7 @@ func New(opts Options) (*Daemon, error) {
 		SyncWritingNow: func(gameID string) bool {
 			return d.P2P != nil && d.P2P.Sync != nil && d.P2P.Sync.WritingNow(gameID)
 		},
+		HoldSnapshot: d.holdSnapshotWhilePlaying,
 		OnChanged: func(gameID string) {
 			// An emptied save is noticed as it happens, and said on screen,
 			// even with no other device online to hold it back from.
@@ -789,6 +802,19 @@ func isDuplicateGameID(err error) bool {
 // TrackGame adds a new game, takes its initial snapshot (when the save
 // location already has content), and starts watching it.
 func (d *Daemon) TrackGame(game store.Game) (store.Game, error) {
+	return d.trackGameAdmitted(game, nil)
+}
+
+// TrackImportedGame reuses native tracking while retaining the cross-process
+// ownership admission acquired before the backup was extracted.
+func (d *Daemon) TrackImportedGame(game store.Game, admission *store.ImportPathAdmission) (store.Game, error) {
+	if admission == nil {
+		return store.Game{}, fmt.Errorf("missing import admission")
+	}
+	return d.trackGameAdmitted(game, admission)
+}
+
+func (d *Daemon) trackGameAdmitted(game store.Game, admission *store.ImportPathAdmission) (store.Game, error) {
 	abs, err := d.ValidateSavePath(game.SavePath)
 	if err != nil {
 		return store.Game{}, err
@@ -864,7 +890,13 @@ func (d *Daemon) TrackGame(game store.Game) (store.Game, error) {
 		game.CoverURL = SteamCoverURL(game.AppID)
 	}
 
-	if err := d.Store.CreateGame(game); err != nil {
+	var createErr error
+	if admission != nil {
+		createErr = d.Store.CreateGameAdmitted(game, admission)
+	} else {
+		createErr = d.Store.CreateGame(game)
+	}
+	if err := createErr; err != nil {
 		// The id was free a moment ago. If it is taken now, a paired device
 		// that syncs this same game reached us in between and auto-tracked
 		// it — the two sides create the game concurrently when both people
