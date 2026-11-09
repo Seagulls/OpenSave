@@ -33,6 +33,7 @@ func (s *Server) routes(r chi.Router) {
 	// The game database, for tracking a game by hand (daemon/gamedb.go).
 	r.Get("/api/gamedb/search", s.handleGameDBSearch)
 	r.Get("/api/gamedb/identify", s.handleGameDBIdentify)
+	r.Get("/api/gamedb/running", s.handleGameDBRunning)
 	r.Get("/api/suggest-name", s.handleSuggestName)
 	r.Post("/api/games/untrack-bulk", s.handleBulkUntrack)
 
@@ -373,12 +374,12 @@ func (s *Server) handleTrackGame(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	game, err := s.Daemon.TrackGame(store.Game{Name: body.Name, SavePath: body.SavePath, AppID: body.AppID, ExePath: body.ExePath})
+	game, err := s.Daemon.TrackGameContext(r.Context(), store.Game{Name: body.Name, SavePath: body.SavePath, AppID: body.AppID, ExePath: body.ExePath})
 	if err != nil {
 		// Duplicates (id or path) are conflicts; anything else the daemon
 		// rejects is bad input.
 		status := http.StatusBadRequest
-		if errors.Is(err, store.ErrGamePathOwned) || errors.Is(err, store.ErrOwnershipClaimsChanged) ||
+		if errors.Is(err, store.ErrGamePathOwned) || errors.Is(err, store.ErrPathClaimBusy) || errors.Is(err, store.ErrOwnershipClaimsChanged) ||
 			strings.Contains(err.Error(), "already track") ||
 			strings.Contains(err.Error(), "already exists") {
 			status = http.StatusConflict
@@ -440,6 +441,13 @@ func (s *Server) handleUpdateGame(w http.ResponseWriter, r *http.Request) {
 		}
 		game.SavePath = abs
 	}
+	// A combined path+exclusion change would rebase agreement from a new
+	// path before admission. Refuse rather than claim old lineage for new
+	// save bytes; a safe combined transition needs a separate explicit design.
+	if game.SavePath != oldSavePath && s.Daemon.IgnoreText(game) != oldIgnore {
+		writeError(w, http.StatusConflict, "Change save location and sync exclusions separately.")
+		return
+	}
 	// Cover art: a user-set custom URL is always kept. An empty cover, or
 	// a previously auto-generated Steam cover, is (re)derived from the
 	// AppID — so changing the AppID refreshes the art.
@@ -488,9 +496,16 @@ func (s *Server) handleUpdateGame(w http.ResponseWriter, r *http.Request) {
 		game.LastManifestHash = s.Daemon.LastSnapshotHashUnder(game, oldIgnore)
 	}
 
-	if err := s.Daemon.Store.UpdateGame(game); err != nil {
+	if game.SavePath != oldSavePath {
+		done, ok := s.acquireRootTopology(w, r, gameID)
+		if !ok {
+			return
+		}
+		defer done()
+	}
+	if err := s.Daemon.Store.UpdateGameContext(r.Context(), game); err != nil {
 		status := notFoundToStatus(err)
-		if errors.Is(err, store.ErrOwnershipClaimsChanged) || errors.Is(err, store.ErrGamePathOwned) {
+		if errors.Is(err, store.ErrPathClaimBusy) || errors.Is(err, store.ErrOwnershipClaimsChanged) || errors.Is(err, store.ErrGamePathOwned) {
 			status = http.StatusConflict
 		}
 		writeError(w, status, err.Error())
